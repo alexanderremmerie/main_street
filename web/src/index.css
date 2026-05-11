@@ -1,0 +1,38 @@
+@import "tailwindcss";
+
+/* Two semantic accents the UI depends on. Plain CSS variables (not Tailwind
+   @theme palette) so they paint identically on every browser. */
+/* Project resets live in @layer base so Tailwind utilities (which live in
+   @layer utilities, declared later) win the cascade. Previously these rules
+   were at the top level, which CSS-layers-wise sits ABOVE all explicit
+   layers — meaning `button { background: none }` was silently overriding
+   every `bg-*` utility on every button. */
+@layer base {
+  * { box-sizing: border-box; }
+  html, body, #root { height: 100%; margin: 0; }
+  html { overscroll-behavior: none; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, "Helvetica Neue", sans-serif;
+    font-size: 14px;
+    line-height: 1.45;
+    color: #171717;
+    background: #ffffff;
+    overscroll-behavior: none;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  /* `appearance: none` is the only way to stop Safari from painting native
+     button chrome over our background. Without it, even a correctly-applied
+     CSS background can be invisible under macOS's native button skin. */
+  button {
+    cursor: pointer;
+    appearance: none;
+    -webkit-appearance: none;
+  }
+  button:disabled { cursor: not-allowed; }
+  a { color: inherit; text-decoration: none; }
+}
+
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+input[type="number"] { -moz-appearance: textfield; }

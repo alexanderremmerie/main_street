@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Node / frontend
+web/node_modules/
+web/dist/
+web/.vite/
+
+# Data — runtime artifacts; tracked via .gitkeep
+data/*
+!data/.gitkeep
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/

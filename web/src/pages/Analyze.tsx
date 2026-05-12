@@ -22,6 +22,7 @@ import {
   NumberInput,
   PrimaryButton,
   SecondaryButton,
+  Select,
   TextInput,
 } from "../components/Form";
 import { Mark } from "../components/Mark";
@@ -35,10 +36,26 @@ import { statesAlong } from "../game";
 import { parseSchedule } from "../schedule";
 import type {
   AnalyzeResponse,
+  GameRecord,
   GameSpec,
+  InspectModelResponse,
   PlayerRecord,
   PlayerVerdict,
 } from "../types";
+
+function gameCutoff(actionCount: number, stepText: string | null) {
+  if (stepText !== null) {
+    const parsed = Number(stepText);
+    if (Number.isFinite(parsed)) {
+      return Math.max(0, Math.min(actionCount, parsed));
+    }
+  }
+  return actionCount;
+}
+
+function seededActions(g: GameRecord, stepText: string | null) {
+  return g.actions.slice(0, gameCutoff(g.actions.length, stepText));
+}
 
 export function AnalyzePage() {
   const [searchParams] = useSearchParams();
@@ -56,18 +73,23 @@ export function AnalyzePage() {
   const [players, setPlayers] = useState<PlayerRecord[] | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [analysis, setAnalysis] = useState<AnalyzeResponse | null>(null);
+  const [inspection, setInspection] = useState<InspectModelResponse | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
+  const [inspecting, setInspecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loadGameId, setLoadGameId] = useState(seededGameId ?? "");
+  const [inspectPlayerId, setInspectPlayerId] = useState("");
+  const [inspectSims, setInspectSims] = useState(200);
 
   const schedule = useMemo(() => parseSchedule(scheduleText), [scheduleText]);
   const sum = schedule?.reduce((a, b) => a + b, 0) ?? 0;
-  const spec: GameSpec | null =
-    schedule !== null && n > 0 && sum <= n ? { n, schedule } : null;
+  const spec: GameSpec | null = useMemo(
+    () => (schedule !== null && n > 0 && sum <= n ? { n, schedule } : null),
+    [n, schedule, sum],
+  );
 
-  // After an N/schedule change, `actions` is briefly stale (a cell from the
-  // old spec may be out of range). Catch the one-tick mismatch; the
-  // clear-actions effect below resolves it on the next render.
+  // After an N/schedule change, `actions` can be briefly stale while React
+  // batches updates. Catch the one-tick mismatch; input handlers clear actions.
   const states = useMemo(() => {
     if (!spec) return null;
     try {
@@ -78,6 +100,28 @@ export function AnalyzePage() {
   }, [spec, actions]);
   const state = states?.[states.length - 1] ?? null;
 
+  const updateN = (value: number | null) => {
+    setN(value ?? 0);
+    setActions([]);
+    setAnalysis(null);
+    setInspection(null);
+  };
+
+  const updateScheduleText = (value: string) => {
+    setScheduleText(value);
+    setActions([]);
+    setAnalysis(null);
+    setInspection(null);
+  };
+
+  const applySeededGame = (g: GameRecord, stepText: string | null) => {
+    setN(g.spec.n);
+    setScheduleText(g.spec.schedule.join(","));
+    setActions(seededActions(g, stepText));
+    setAnalysis(null);
+    setInspection(null);
+  };
+
   useEffect(() => {
     let cancelled = false;
     api
@@ -85,6 +129,8 @@ export function AnalyzePage() {
       .then((ps) => {
         if (cancelled) return;
         setPlayers(ps);
+        const firstModel = ps.find((p) => p.agent_spec.kind === "alphazero");
+        if (firstModel) setInspectPlayerId(firstModel.id);
         const defaults = ps
           .filter((p) =>
             ["p_alphabeta_exact", "p_greedy_0", "p_rightmost"].includes(p.id),
@@ -104,10 +150,13 @@ export function AnalyzePage() {
   useEffect(() => {
     if (seededN !== null) {
       const parsed = Number(seededN);
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- route params are external navigation state.
       if (Number.isFinite(parsed) && parsed > 0) setN(parsed);
     }
     if (seededSchedule !== null) setScheduleText(seededSchedule);
     if (seededN !== null || seededSchedule !== null) setActions([]);
+    if (seededN !== null || seededSchedule !== null) setAnalysis(null);
+    if (seededN !== null || seededSchedule !== null) setInspection(null);
   }, [seededN, seededSchedule]);
 
   useEffect(() => {
@@ -117,14 +166,7 @@ export function AnalyzePage() {
       .getGame(seededGameId)
       .then((g) => {
         if (cancelled) return;
-        setN(g.spec.n);
-        setScheduleText(g.spec.schedule.join(","));
-        const cutoff =
-          seededStep !== null
-            ? Math.max(0, Math.min(g.actions.length, Number(seededStep)))
-            : g.actions.length;
-        setActions(g.actions.slice(0, cutoff));
-        setAnalysis(null);
+        applySeededGame(g, seededStep);
       })
       .catch((e) => {
         if (!cancelled) setError(errorMessage(e));
@@ -134,36 +176,30 @@ export function AnalyzePage() {
     };
   }, [seededGameId, seededStep]);
 
-  // Drop stale actions when the spec changes — old indices may be out of
-  // range for the new board.
-  useEffect(() => {
-    setActions([]);
-    setAnalysis(null);
-  }, [n, scheduleText]);
-
-  useEffect(() => {
-    setAnalysis(null);
-  }, [actions]);
-
   const onCellClick = (cell: number) => {
     if (!state || state.isTerminal) return;
     if (state.board[cell] !== 0) return;
+    setAnalysis(null);
+    setInspection(null);
     setActions((prev) => [...prev, cell]);
   };
 
-  const undo = () => setActions((prev) => prev.slice(0, -1));
+  const undo = () => {
+    setAnalysis(null);
+    setInspection(null);
+    setActions((prev) => prev.slice(0, -1));
+  };
   const clear = () => {
     setActions([]);
     setAnalysis(null);
+    setInspection(null);
   };
 
   const loadGame = async () => {
     if (!loadGameId.trim()) return;
     try {
       const g = await api.getGame(loadGameId.trim());
-      setN(g.spec.n);
-      setScheduleText(g.spec.schedule.join(","));
-      setActions(g.actions);
+      applySeededGame(g, null);
     } catch (e) {
       setError(errorMessage(e));
     }
@@ -196,6 +232,25 @@ export function AnalyzePage() {
     }
   };
 
+  const inspect = async () => {
+    if (!spec || !state || state.isTerminal || !inspectPlayerId) return;
+    setInspecting(true);
+    setError(null);
+    try {
+      const r = await api.inspectModel({
+        spec,
+        actions,
+        player_id: inspectPlayerId,
+        n_simulations: inspectSims,
+      });
+      setInspection(r);
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setInspecting(false);
+    }
+  };
+
   // Oracle fields are always set together or all null on the server. The
   // explicit guard keeps the discriminated union narrowing intact.
   const annotations =
@@ -222,7 +277,7 @@ export function AnalyzePage() {
 
       <FormBox>
         <FormRow label="N" hint={`${n} cells`}>
-          <NumberInput value={n} onChange={(v) => setN(v ?? 0)} />
+          <NumberInput value={n} onChange={updateN} />
         </FormRow>
         <FormRow
           label="Schedule"
@@ -230,7 +285,7 @@ export function AnalyzePage() {
         >
           <TextInput
             value={scheduleText}
-            onChange={setScheduleText}
+            onChange={updateScheduleText}
             mono
             placeholder="2,2,1"
           />
@@ -338,6 +393,167 @@ export function AnalyzePage() {
       {error && <Notice kind="error">{error}</Notice>}
 
       {analysis && <VerdictsTable analysis={analysis} players={players ?? []} />}
+
+      <ModelInspectPanel
+        players={players ?? []}
+        selectedId={inspectPlayerId}
+        setSelectedId={setInspectPlayerId}
+        sims={inspectSims}
+        setSims={setInspectSims}
+        disabled={!spec || !state || state.isTerminal || inspecting}
+        inspecting={inspecting}
+        onInspect={inspect}
+        result={inspection}
+      />
+    </div>
+  );
+}
+
+function ModelInspectPanel({
+  players,
+  selectedId,
+  setSelectedId,
+  sims,
+  setSims,
+  disabled,
+  inspecting,
+  onInspect,
+  result,
+}: {
+  players: PlayerRecord[];
+  selectedId: string;
+  setSelectedId: (id: string) => void;
+  sims: number;
+  setSims: (n: number) => void;
+  disabled: boolean;
+  inspecting: boolean;
+  onInspect: () => void;
+  result: InspectModelResponse | null;
+}) {
+  const modelPlayers = players.filter((p) => p.agent_spec.kind === "alphazero");
+  return (
+    <div className="space-y-3">
+      <SectionHeader title="Model inspect" />
+      <FormBox>
+        <FormRow label="Model">
+          <Select
+            value={selectedId}
+            onChange={setSelectedId}
+            options={modelPlayers.map((p) => ({ value: p.id, label: p.label }))}
+            width="w-80"
+          />
+          <span className="text-xs text-neutral-500">
+            raw policy/value plus PUCT visits for the current position
+          </span>
+        </FormRow>
+        <FormRow label="Search">
+          <NumberInput value={sims} onChange={(v) => setSims(v ?? 0)} />
+          <span className="text-xs text-neutral-500">PUCT simulations</span>
+          <div className="ml-auto">
+            <PrimaryButton
+              onClick={onInspect}
+              disabled={disabled || !selectedId || modelPlayers.length === 0}
+            >
+              {inspecting ? "Inspecting..." : "Inspect model"}
+            </PrimaryButton>
+          </div>
+        </FormRow>
+        {modelPlayers.length === 0 && (
+          <div className="text-xs text-neutral-500">
+            Create or keep an AlphaZero player first; classical agents do not
+            expose policy/value tensors.
+          </div>
+        )}
+      </FormBox>
+
+      {result && <InspectionResult result={result} />}
+    </div>
+  );
+}
+
+function InspectionResult({ result }: { result: InspectModelResponse }) {
+  const maxRaw = Math.max(...result.moves.map((m) => m.raw_policy), 1e-9);
+  const maxVisits = Math.max(...result.moves.map((m) => m.puct_visits), 1);
+  return (
+    <div className="border border-neutral-200 bg-white">
+      <div className="px-3 py-2 border-b border-neutral-200 flex items-center gap-3 text-sm">
+        <span className="font-medium text-neutral-900">{result.label}</span>
+        <span className="text-neutral-300">·</span>
+        <span className="text-neutral-500 flex items-center gap-1">
+          value for <Mark player={result.current_player === 1 ? "X" : "O"} />
+          <span className="font-mono tabular-nums text-neutral-900">
+            {result.raw_value.toFixed(3)}
+          </span>
+        </span>
+        <span className="text-neutral-300">·</span>
+        <span className="text-neutral-500">
+          PUCT picks{" "}
+          <span className="font-mono tabular-nums text-neutral-900">
+            {result.puct_action}
+          </span>
+        </span>
+      </div>
+      <table className="w-full text-sm">
+        <thead className="text-[11px] uppercase text-neutral-500 bg-neutral-50/50 border-b border-neutral-200">
+          <tr>
+            <th className="text-left px-3 py-2 font-normal">cell</th>
+            <th className="text-left px-3 py-2 font-normal">raw policy</th>
+            <th className="text-left px-3 py-2 font-normal">PUCT visits</th>
+            <th className="text-right px-3 py-2 font-normal">move value</th>
+          </tr>
+        </thead>
+        <tbody>
+          {result.moves.map((m) => (
+            <tr
+              key={m.cell}
+              className={`border-b border-neutral-100 last:border-0 ${
+                m.cell === result.puct_action ? "bg-emerald-50/70" : ""
+              }`}
+            >
+              <td className="px-3 py-2 font-mono tabular-nums">{m.cell}</td>
+              <td className="px-3 py-2">
+                <MetricBar
+                  value={m.raw_policy}
+                  max={maxRaw}
+                  label={`${(m.raw_policy * 100).toFixed(1)}%`}
+                />
+              </td>
+              <td className="px-3 py-2">
+                <MetricBar
+                  value={m.puct_visits}
+                  max={maxVisits}
+                  label={`${m.puct_visits} (${(m.puct_visit_prob * 100).toFixed(1)}%)`}
+                />
+              </td>
+              <td className="px-3 py-2 text-right font-mono tabular-nums">
+                {m.puct_value === null ? "—" : m.puct_value.toFixed(3)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function MetricBar({
+  value,
+  max,
+  label,
+}: {
+  value: number;
+  max: number;
+  label: string;
+}) {
+  const pct = max > 0 ? Math.max(1, Math.round((value / max) * 100)) : 0;
+  return (
+    <div className="flex items-center gap-2">
+      <div className="h-2 w-24 bg-neutral-100 border border-neutral-200">
+        <div className="h-full bg-neutral-900" style={{ width: `${pct}%` }} />
+      </div>
+      <span className="font-mono text-xs tabular-nums text-neutral-700">
+        {label}
+      </span>
     </div>
   );
 }

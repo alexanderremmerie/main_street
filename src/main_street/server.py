@@ -3,19 +3,35 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 import uuid
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Annotated
 
+import torch
+import torch.nn.functional as F
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import store
-from .agents import KINDS, LABELS, SPEC_TYPES, AgentSpec, HumanAgentSpec, build
-from .core import GameSpec, final_state
+from .agents import (
+    KINDS,
+    LABELS,
+    SPEC_TYPES,
+    AgentSpec,
+    AlphaZeroAgentSpec,
+    HumanAgentSpec,
+    build,
+)
+from .core import GameSpec, final_state, legal_actions
+from .nn.checkpoint import discover_checkpoints, load_checkpoint
+from .nn.encode import Encoder
+from .nn.mcts import puct_search, select_action
+from .nn.models import Model
 from .records import (
     ComparisonConfig,
     ComparisonRecord,
@@ -24,13 +40,39 @@ from .records import (
     GameRecord,
     PlayerRecord,
 )
-from .runner import record_from_actions, run_comparison, run_tournament
+from .runner import (
+    prepare_comparison,
+    record_from_actions,
+    run_comparison,
+    run_tournament,
+)
 from .solve import solve
+from .spec_sampling import SpecSamplerConfig, sample_unique_specs
 
 # Cap the state space the oracle is willing to solve. The branching factor is
 # at most N, so this bounds the number of leaves at roughly N**sum(schedule).
 # Above this, the API politely declines rather than locking up the server.
 ORACLE_MAX_LEAVES = 200_000
+_comparison_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="comparison")
+_comparison_cancel_events: dict[str, threading.Event] = {}
+_checkpoint_cache: dict[str, tuple[float, Model, Encoder]] = {}
+_checkpoint_cache_lock = threading.Lock()
+
+
+def _load_checkpoint_cached(path: Path) -> tuple[Model, Encoder]:
+    """Cache (model, encoder) per checkpoint path, keyed by mtime. Loading a
+    .pt file costs hundreds of ms; the inspect-model UI hits this on every
+    interaction."""
+    key = str(path)
+    mtime = path.stat().st_mtime
+    with _checkpoint_cache_lock:
+        cached = _checkpoint_cache.get(key)
+        if cached is not None and cached[0] == mtime:
+            return cached[1], cached[2]
+    model, encoder, _meta = load_checkpoint(path)
+    with _checkpoint_cache_lock:
+        _checkpoint_cache[key] = (mtime, model, encoder)
+    return model, encoder
 
 
 def _db(request: Request) -> Iterator[sqlite3.Connection]:
@@ -48,6 +90,15 @@ class AgentKind(BaseModel):
     kind: str
     label: str
     schema_: dict
+
+
+class CheckpointInfo(BaseModel):
+    path: str
+    run_id: str
+    run_name: str
+    label: str
+    iter: int | None = None
+    is_final: bool = False
 
 
 class GameList(BaseModel):
@@ -108,6 +159,12 @@ class SpecSummary(BaseModel):
     last_game_at: str | None = None
 
 
+class SampleSpecsRequest(BaseModel):
+    sampler: SpecSamplerConfig
+    count: int = Field(ge=1, le=1000)
+    seed: int = 0
+
+
 class CreatePlayerRequest(BaseModel):
     """Create a custom player. The label must be unique; we don't auto-suffix
     because silent collisions in a research database are worse than a 409."""
@@ -127,6 +184,34 @@ class AnalyzeRequest(BaseModel):
     spec: GameSpec
     actions: tuple[int, ...]
     player_ids: tuple[str, ...]
+
+
+class InspectModelRequest(BaseModel):
+    """Inspect an AlphaZero player's raw network and PUCT search on a position."""
+
+    spec: GameSpec
+    actions: tuple[int, ...]
+    player_id: str
+    n_simulations: int = Field(default=200, ge=1, le=5000)
+
+
+class InspectMove(BaseModel):
+    cell: int
+    raw_policy: float
+    puct_visits: int
+    puct_visit_prob: float
+    puct_value: float | None = None
+
+
+class InspectModelResponse(BaseModel):
+    player_id: str
+    label: str
+    checkpoint_path: str
+    current_player: int
+    raw_value: float
+    puct_action: int
+    n_simulations: int
+    moves: list[InspectMove]
 
 
 class PlayerVerdict(BaseModel):
@@ -190,6 +275,20 @@ def create_app(db_path: Path | None = None) -> FastAPI:
             for k in KINDS
         ]
 
+    @app.get("/api/checkpoints", response_model=list[CheckpointInfo])
+    def list_checkpoints() -> list[CheckpointInfo]:
+        return [
+            CheckpointInfo(
+                path=str(c.path),
+                run_id=c.run_id,
+                run_name=c.run_name,
+                label=f"{c.run_name} / {'final' if c.is_final else c.path.stem}",
+                iter=c.iter,
+                is_final=c.is_final,
+            )
+            for c in discover_checkpoints(Path("data") / "runs")
+        ]
+
     @app.get("/api/games", response_model=GameList)
     def list_games(
         conn: Conn,
@@ -235,10 +334,82 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         cell = int(agent.act(state))
         return MoveResponse(cell=cell)
 
+    @app.post("/api/inspect-model", response_model=InspectModelResponse)
+    def inspect_model(req: InspectModelRequest, conn: Conn) -> InspectModelResponse:
+        player = store.get_player(conn, req.player_id)
+        if player is None:
+            raise HTTPException(404, "player not found")
+        if not isinstance(player.agent_spec, AlphaZeroAgentSpec):
+            raise HTTPException(400, "model inspection requires an AlphaZero player")
+        try:
+            state = final_state(req.spec, req.actions)
+        except ValueError as e:
+            raise HTTPException(400, f"invalid action sequence: {e}") from e
+        if state.is_terminal:
+            raise HTTPException(400, "game is already terminal")
+
+        ckpt_path = Path(player.agent_spec.checkpoint_path)
+        if not ckpt_path.exists():
+            raise HTTPException(404, f"checkpoint not found: {ckpt_path}")
+        model, encoder = _load_checkpoint_cached(ckpt_path)
+        with torch.inference_mode():
+            inputs = encoder([state])
+            logits, raw_value = model(inputs)
+            probs = F.softmax(logits[0], dim=-1).cpu().numpy()
+        root = puct_search(
+            state,
+            model,
+            encoder,
+            n_simulations=req.n_simulations,
+            c_puct=player.agent_spec.c_puct,
+        )
+        puct_action = select_action(root, temperature=0.0)
+
+        legal = [int(a) for a in legal_actions(state)]
+        total_child_visits = sum(c.visit_count for c in root.children.values())
+        root_is_x = int(state.current_player) == 1
+        moves: list[InspectMove] = []
+        for cell in legal:
+            child = root.children.get(cell)
+            visits = child.visit_count if child is not None else 0
+            value = None
+            if child is not None and child.visit_count > 0:
+                avg_x = child.value_sum_x / child.visit_count
+                value = avg_x if root_is_x else -avg_x
+            moves.append(
+                InspectMove(
+                    cell=cell,
+                    raw_policy=float(probs[cell]),
+                    puct_visits=visits,
+                    puct_visit_prob=(
+                        visits / total_child_visits if total_child_visits > 0 else 0.0
+                    ),
+                    puct_value=value,
+                )
+            )
+        moves.sort(key=lambda m: (-m.puct_visits, -m.raw_policy, -m.cell))
+        return InspectModelResponse(
+            player_id=player.id,
+            label=player.label,
+            checkpoint_path=player.agent_spec.checkpoint_path,
+            current_player=int(state.current_player),
+            raw_value=float(raw_value[0]),
+            puct_action=int(puct_action),
+            n_simulations=req.n_simulations,
+            moves=moves,
+        )
+
     @app.get("/api/specs", response_model=list[SpecSummary])
     def list_specs(conn: Conn) -> list[SpecSummary]:
         rows = store.list_spec_summaries(conn)
         return [SpecSummary.model_validate(r) for r in rows]
+
+    @app.post("/api/specs/sample", response_model=list[GameSpec])
+    def sample_specs(req: SampleSpecsRequest) -> list[GameSpec]:
+        try:
+            return list(sample_unique_specs(req.sampler, req.count, req.seed))
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
 
     @app.get("/api/players", response_model=list[PlayerRecord])
     def list_players(conn: Conn) -> list[PlayerRecord]:
@@ -396,12 +567,44 @@ def create_app(db_path: Path | None = None) -> FastAPI:
             raise HTTPException(404, "comparison not found")
         return rec
 
+    def _run_comparison_background(
+        db_path: Path, comparison_id: str, cancel: threading.Event
+    ) -> None:
+        conn = store.connect(db_path)
+        try:
+            run_comparison(conn, comparison_id, cancel=cancel)
+        finally:
+            conn.close()
+            _comparison_cancel_events.pop(comparison_id, None)
+
     @app.post("/api/comparisons", response_model=ComparisonRecord)
     def post_comparison(config: ComparisonConfig, conn: Conn) -> ComparisonRecord:
         try:
-            return run_comparison(conn, config)
+            record = prepare_comparison(conn, config)
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
+        cancel = threading.Event()
+        _comparison_cancel_events[record.id] = cancel
+        _comparison_executor.submit(
+            _run_comparison_background, Path(app.state.db_path), record.id, cancel
+        )
+        return record
+
+    @app.post("/api/comparisons/{comparison_id}/cancel", response_model=ComparisonRecord)
+    def cancel_comparison(comparison_id: str, conn: Conn) -> ComparisonRecord:
+        rec = store.get_comparison(conn, comparison_id)
+        if rec is None:
+            raise HTTPException(404, "comparison not found")
+        if rec.status in ("done", "failed", "cancelled"):
+            return rec
+        with conn:
+            marked = store.request_comparison_cancel(conn, comparison_id)
+        updated = store.get_comparison(conn, comparison_id)
+        assert updated is not None
+        event = _comparison_cancel_events.get(comparison_id)
+        if marked and event is not None:
+            event.set()
+        return updated
 
     web_dist = Path(__file__).resolve().parents[2] / "web" / "dist"
     if web_dist.exists():

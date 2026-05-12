@@ -30,8 +30,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..core import X
 from ..eval.positions import PositionSet
 from .buffer import ReplayBuffer, Sample
-from .checkpoint import CheckpointMeta, save_checkpoint
-from .encode import Encoder, EncoderConfig, build_encoder
+from .checkpoint import CheckpointMeta, load_checkpoint, save_checkpoint
+from .encode import Encoder, EncoderConfig, build_encoder, to_device
 from .mcts import puct_search, select_action
 from .models import build_model
 from .sources import SourceConfig
@@ -59,6 +59,12 @@ class LoopConfig(BaseModel):
     weight_decay: float = 1e-4
     eval_every: int = 5
     eval_n_simulations: int = 64
+    eval_batch_size: int = Field(default=4096, gt=0)
+    eval_max_positions: int | None = Field(
+        default=None,
+        gt=0,
+        description="If set, score a deterministic subset of each eval set during training.",
+    )
 
 
 class WandbConfig(BaseModel):
@@ -72,6 +78,8 @@ class TrainConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
     name: str
     seed: int = 0
+    device: Literal["auto", "cpu", "mps", "cuda"] = "auto"
+    init_checkpoint: str | None = None
     model: ModelConfig = Field(default_factory=ModelConfig)
     encoder: EncoderConfig = Field(default_factory=EncoderConfig)
     data: DataConfig
@@ -80,6 +88,20 @@ class TrainConfig(BaseModel):
 
 
 # ---------- Loss + step ------------------------------------------------------
+
+
+def _resolve_device(name: Literal["auto", "cpu", "mps", "cuda"]) -> torch.device:
+    if name == "auto":
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        return torch.device("cpu")
+    if name == "mps" and not torch.backends.mps.is_available():
+        raise RuntimeError("requested device='mps', but MPS is not available")
+    if name == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("requested device='cuda', but CUDA is not available")
+    return torch.device(name)
 
 
 def _build_targets(batch: list[Sample], max_n: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -102,10 +124,13 @@ def _train_step(
     optimizer: torch.optim.Optimizer,
     batch: list[Sample],
     encoder: Encoder,
+    device: torch.device,
 ) -> dict[str, float]:
     states = [s.state for s in batch]
-    inputs = encoder(states)
+    inputs = to_device(encoder(states), device)
     pi_target, z_target = _build_targets(batch, encoder.max_n)
+    pi_target = pi_target.to(device)
+    z_target = z_target.to(device)
 
     logits, value = model(inputs)
     log_p = F.log_softmax(logits, dim=-1)
@@ -128,29 +153,43 @@ def _train_step(
 # ---------- Eval --------------------------------------------------------------
 
 
-def _in_range_indices(ps: PositionSet, encoder: Encoder) -> list[int]:
+def _in_range_indices(
+    ps: PositionSet, encoder: Encoder, max_positions: int | None = None
+) -> list[int]:
     """Indices into `ps` whose spec fits the encoder. Stable across the run."""
-    return [
+    indices = [
         i
         for i in range(len(ps))
         if (spec := ps.specs[int(ps.spec_idx[i])]).n <= encoder.max_n
         and len(spec.schedule) <= encoder.max_turns
     ]
+    if max_positions is not None and len(indices) > max_positions:
+        picked = np.linspace(0, len(indices) - 1, num=max_positions, dtype=np.int64)
+        return [indices[int(i)] for i in picked]
+    return indices
 
 
 def _score_raw(
-    model, encoder: Encoder, ps: PositionSet, in_range: list[int]
+    model,
+    encoder: Encoder,
+    ps: PositionSet,
+    in_range: list[int],
+    device: torch.device,
+    batch_size: int,
 ) -> float:
     if not in_range:
         return 0.0
-    states = [ps.state(i) for i in in_range]
-    with torch.no_grad():
-        inputs = encoder(states)
-        logits, _ = model(inputs)
-    argmax = logits.argmax(dim=-1).cpu().numpy()
-    correct = sum(
-        bool(ps.optimal_mask[in_range[k], int(a)]) for k, a in enumerate(argmax)
-    )
+    correct = 0
+    with torch.inference_mode():
+        for start in range(0, len(in_range), batch_size):
+            chunk = in_range[start : start + batch_size]
+            states = [ps.state(i) for i in chunk]
+            inputs = to_device(encoder(states), device)
+            logits, _ = model(inputs)
+            argmax = logits.argmax(dim=-1).cpu().numpy()
+            correct += sum(
+                bool(ps.optimal_mask[chunk[k], int(a)]) for k, a in enumerate(argmax)
+            )
     return correct / len(in_range)
 
 
@@ -184,6 +223,9 @@ def _eval_metrics(
     sets: dict[str, PositionSet],
     in_range_by_set: dict[str, list[int]],
     puct_sims: int,
+    device: torch.device,
+    raw_batch_size: int,
+    search_model,
     puct_sets: tuple[str, ...] = ("diagnostics",),
 ) -> dict[str, Any]:
     """Raw-policy agreement on every set (cheap, batched). PUCT agreement only
@@ -192,12 +234,14 @@ def _eval_metrics(
     out: dict[str, Any] = {}
     for name, ps in sets.items():
         in_range = in_range_by_set[name]
-        out[f"raw/{name}/agreement"] = _score_raw(model, encoder, ps, in_range)
+        out[f"raw/{name}/agreement"] = _score_raw(
+            model, encoder, ps, in_range, device, raw_batch_size
+        )
         out[f"raw/{name}/skipped"] = len(ps) - len(in_range)
 
         if name in puct_sets:
             puct_agr, per_label = _score_puct(
-                model, encoder, ps, in_range, puct_sims
+                search_model, encoder, ps, in_range, puct_sims
             )
             out[f"puct/{name}/agreement"] = puct_agr
             for lbl, ok in per_label.items():
@@ -226,6 +270,7 @@ class Trainer:
     def run(self) -> Path:
         torch.manual_seed(self.cfg.seed)
         rng = np.random.default_rng(self.cfg.seed)
+        device = _resolve_device(self.cfg.device)
 
         encoder = build_encoder(self.cfg.encoder)
 
@@ -235,7 +280,8 @@ class Trainer:
             "diagnostics": PositionSet.load("diagnostics"),
         }
         in_range_by_set = {
-            name: _in_range_indices(ps, encoder) for name, ps in eval_sets.items()
+            name: _in_range_indices(ps, encoder, self.cfg.loop.eval_max_positions)
+            for name, ps in eval_sets.items()
         }
 
         sources = [cfg.build() for cfg in self.cfg.data.sources]
@@ -245,7 +291,22 @@ class Trainer:
             + ", ".join(f"#{i}={s.size}@w={s.weight}" for i, s in enumerate(sources))
         )
 
-        model = build_model(self.cfg.model.name, encoder, self.cfg.model.params)
+        model = build_model(self.cfg.model.name, encoder, self.cfg.model.params).to(device)
+        if self.cfg.init_checkpoint:
+            init_model, _init_encoder, init_meta = load_checkpoint(
+                Path(self.cfg.init_checkpoint)
+            )
+            model.load_state_dict(init_model.state_dict())
+            print(
+                f"[{self.run_id}] initialized from {self.cfg.init_checkpoint} "
+                f"({init_meta.run_id}@{init_meta.iter})"
+            )
+        search_model = build_model(self.cfg.model.name, encoder, self.cfg.model.params)
+        search_model.load_state_dict(
+            {k: v.detach().cpu() for k, v in model.state_dict().items()}
+        )
+        search_model.eval()
+        print(f"[{self.run_id}] device: train={device} search=cpu")
         optimizer = torch.optim.Adam(
             model.parameters(),
             lr=self.cfg.loop.lr,
@@ -265,8 +326,14 @@ class Trainer:
             final_iter = self.cfg.loop.iters
             for it in range(1, final_iter + 1):
                 model.eval()
+                if device.type != "cpu":
+                    search_model.load_state_dict(
+                        {k: v.detach().cpu() for k, v in model.state_dict().items()}
+                    )
+                else:
+                    search_model = model
                 t0 = time.perf_counter()
-                added = buffer.populate(model, encoder)
+                added = buffer.populate(search_model, encoder)
                 t_pop = time.perf_counter() - t0
 
                 model.train()
@@ -274,7 +341,7 @@ class Trainer:
                 losses: list[dict[str, float]] = []
                 for _ in range(self.cfg.loop.steps_per_iter):
                     batch = buffer.sample(self.cfg.loop.batch_size)
-                    losses.append(_train_step(model, optimizer, batch, encoder))
+                    losses.append(_train_step(model, optimizer, batch, encoder, device))
                 t_train = time.perf_counter() - t1
 
                 avg = {
@@ -299,6 +366,9 @@ class Trainer:
                             sets=eval_sets,
                             in_range_by_set=in_range_by_set,
                             puct_sims=self.cfg.loop.eval_n_simulations,
+                            device=device,
+                            raw_batch_size=self.cfg.loop.eval_batch_size,
+                            search_model=search_model,
                         )
                     )
                     ckpt = self.run_dir / "checkpoints" / f"iter_{it:04d}.pt"

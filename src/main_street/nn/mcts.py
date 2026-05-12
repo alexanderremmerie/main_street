@@ -22,7 +22,7 @@ import torch
 import torch.nn.functional as F
 
 from ..core import GameState, X, outcome, step
-from .encode import Encoder
+from .encode import Encoder, to_device
 from .models import Model
 
 _PUCT_DEFAULT_C: Final[float] = 1.5
@@ -58,11 +58,13 @@ def _select(node: Node, c_puct: float) -> int:
     return best_a
 
 
-def _expand(node: Node, model: Model, encoder: Encoder) -> float:
+def _expand(
+    node: Node, model: Model, encoder: Encoder, device: torch.device
+) -> float:
     """Evaluate `node` with the network. Sets priors. Returns value from
     X's perspective."""
-    with torch.no_grad():
-        inputs = encoder([node.state])
+    with torch.inference_mode():
+        inputs = to_device(encoder([node.state]), device)
         logits, value = model(inputs)
     legal = inputs["legal_mask"][0]
     probs = F.softmax(logits[0], dim=-1)
@@ -105,7 +107,8 @@ def puct_search(
     root = Node(state=root_state)
     if root_state.is_terminal:
         return root
-    v_x = _expand(root, model, encoder)
+    device = next(model.parameters()).device
+    v_x = _expand(root, model, encoder, device)
     root.visit_count = 1
     root.value_sum_x = v_x
     if dirichlet_eps > 0.0 and dirichlet_alpha is not None and rng is not None:
@@ -126,7 +129,7 @@ def puct_search(
         if node.state.is_terminal:
             leaf_v_x = float(outcome(node.state))
         else:
-            leaf_v_x = _expand(node, model, encoder)
+            leaf_v_x = _expand(node, model, encoder, device)
         for n in path:
             n.visit_count += 1
             n.value_sum_x += leaf_v_x

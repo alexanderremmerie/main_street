@@ -9,12 +9,13 @@ from __future__ import annotations
 from typing import Annotated, Literal
 
 import numpy as np
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..agents import AgentSpec
 from ..agents import build as build_agent
 from ..core import GameSpec, O, X
 from ..eval.positions import PositionSet
+from ..spec_sampling import SpecSamplerConfig
 from .buffer import CyclicBuffer, Sample, SampleSource
 from .encode import Encoder
 from .models import Model
@@ -35,15 +36,18 @@ class SupervisedSourceConfig(_SourceBase):
 
 
 class SelfPlaySourceConfig(_SourceBase):
-    """One self-play stream. Each game samples uniformly from `specs`.
+    """One self-play stream. Each game samples either uniformly from `specs`,
+    or from `spec_sampler` when a broader distribution is configured.
     `opponent` is `"self"` (current model plays both sides; every move
     becomes a sample) or an `AgentSpec` (learner plays one side, alternating
     per game; only learner moves become samples)."""
 
     kind: Literal["selfplay"] = "selfplay"
-    specs: list[tuple[int, list[int]]] = Field(
+    specs: list[tuple[int, list[int]]] | None = Field(
+        default=None,
         description="Each entry is [n, [schedule...]]."
     )
+    spec_sampler: SpecSamplerConfig | None = None
     games_per_iter: int = 16
     n_simulations: int = 64
     c_puct: float = 1.5
@@ -52,6 +56,12 @@ class SelfPlaySourceConfig(_SourceBase):
     temperature_moves: int = 5
     capacity: int = 100_000
     opponent: Literal["self"] | AgentSpec = "self"
+
+    @model_validator(mode="after")
+    def _check_specs(self) -> SelfPlaySourceConfig:
+        if (self.specs is None) == (self.spec_sampler is None):
+            raise ValueError("provide exactly one of specs or spec_sampler")
+        return self
 
     def build(self) -> SelfPlay:
         return SelfPlay(self)
@@ -100,18 +110,28 @@ class SelfPlay(SampleSource):
     def __init__(self, cfg: SelfPlaySourceConfig) -> None:
         self.weight = cfg.weight
         self.cfg = cfg
-        self._specs = [GameSpec(n=n, schedule=tuple(s)) for n, s in cfg.specs]
+        self._specs = (
+            [GameSpec(n=n, schedule=tuple(s)) for n, s in cfg.specs]
+            if cfg.specs is not None
+            else None
+        )
         self._buffer = CyclicBuffer(cfg.capacity)
         self._opponent = (
             build_agent(cfg.opponent) if cfg.opponent != "self" else None
         )
+
+    def _sample_spec(self, rng: np.random.Generator) -> GameSpec:
+        if self._specs is not None:
+            return self._specs[int(rng.integers(0, len(self._specs)))]
+        assert self.cfg.spec_sampler is not None
+        return self.cfg.spec_sampler.sample(rng)
 
     def populate(
         self, model: Model, encoder: Encoder, rng: np.random.Generator
     ) -> int:
         added = 0
         for _ in range(self.cfg.games_per_iter):
-            spec = self._specs[int(rng.integers(0, len(self._specs)))]
+            spec = self._sample_spec(rng)
             learner_side = (
                 None
                 if self._opponent is None

@@ -1,7 +1,16 @@
-import type { AgentSpec, GameSpec } from "./types";
+import type { AgentSpec, ComparisonRecord, GameSpec } from "./types";
 
 export function formatSpec(spec: GameSpec): string {
   return `N=${spec.n} [${spec.schedule.join(",")}]`;
+}
+
+export type Progress = { done: number; total: number; pct: number };
+
+export function comparisonProgress(rec: ComparisonRecord): Progress {
+  const done = rec.summary?.n_total_games ?? rec.progress_done;
+  const total = rec.progress_total || rec.summary?.n_total_games || 0;
+  const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+  return { done, total, pct };
 }
 
 // `seed: null` and `seed: 0` are different runtime behaviors (nondeterministic

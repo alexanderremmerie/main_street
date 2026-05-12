@@ -6,10 +6,12 @@ humans are involved); `run_tournament` plays many bot-vs-bot games and persists.
 from __future__ import annotations
 
 import sqlite3
+import threading
 import uuid
 from collections.abc import Iterable
 from itertools import combinations
 
+from . import store
 from .agents import AgentSpec, build
 from .core import GameSpec, GameState, X, final_state, outcome, step
 from .records import (
@@ -22,14 +24,24 @@ from .records import (
     GameRecord,
     PairResult,
 )
+from .spec_sampling import sample_unique_specs
 from .store import (
     get_player,
     insert_comparison,
     insert_eval,
     insert_game,
     update_comparison,
+    update_comparison_progress,
     update_eval,
 )
+
+# Flush progress this often during a run so the UI moves. Every game would be
+# one sqlite commit per game, which dominates wall time on cheap matchups.
+_PROGRESS_FLUSH_INTERVAL = 8
+
+
+class Cancelled(Exception):
+    pass
 
 
 def _new_id() -> str:
@@ -101,21 +113,86 @@ def play(
     )
 
 
-def run_comparison(
-    conn: sqlite3.Connection, config: ComparisonConfig
-) -> ComparisonRecord:
-    """Run an N-player × M-spec comparison.
+def prepare_comparison(conn: sqlite3.Connection, config: ComparisonConfig) -> ComparisonRecord:
+    """Validate, resolve sampled specs, and insert a running comparison row.
 
-    Each unordered pair `(P_i, P_j)` becomes one `EvalConfig` covering every
-    spec in `config.specs`. The underlying tournaments are persisted as
-    ordinary `evals` rows; this function only records the comparison's
-    metadata and references their IDs.
-
-    Player resolution happens up front so a missing player ID fails the whole
-    comparison immediately rather than mid-run.
+    Player resolution happens up front so bad requests fail before a background
+    job is launched. Sampled arenas are materialized into `config.specs` so the
+    stored comparison is reproducible.
     """
     if len(set(config.player_ids)) != len(config.player_ids):
         raise ValueError("player_ids must be unique within a comparison")
+
+    resolved_specs = config.specs
+    if config.spec_sampler is not None and config.n_sampled_specs is not None:
+        resolved_specs = sample_unique_specs(
+            config.spec_sampler, config.n_sampled_specs, seed=config.seed
+        )
+        config = config.model_copy(update={"specs": resolved_specs})
+
+    for pid in config.player_ids:
+        player = get_player(conn, pid)
+        if player is None:
+            raise ValueError(f"player {pid!r} not found")
+
+    n_pairs = len(config.player_ids) * (len(config.player_ids) - 1) // 2
+    progress_total = n_pairs * len(config.specs) * config.n_games_per_spec
+    comparison_id = _new_id()
+    record = ComparisonRecord(
+        id=comparison_id,
+        config=config,
+        status="running",
+        progress_done=0,
+        progress_total=progress_total,
+    )
+    with conn:
+        insert_comparison(conn, record)
+    return record
+
+
+class _ProgressTracker:
+    """Throttled writer for `comparisons.progress_done`. Flushes every K bumps
+    plus a final flush — saves one sqlite commit per game on long arenas."""
+
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        comparison_id: str,
+        done: int,
+        total: int,
+    ) -> None:
+        self._conn = conn
+        self._comparison_id = comparison_id
+        self.done = done
+        self.total = total
+        self._unflushed = 0
+
+    def bump(self) -> None:
+        self.done += 1
+        self._unflushed += 1
+        if self._unflushed >= _PROGRESS_FLUSH_INTERVAL or self.done == self.total:
+            self.flush()
+
+    def flush(self) -> None:
+        if self._unflushed == 0:
+            return
+        with self._conn:
+            update_comparison_progress(
+                self._conn, self._comparison_id, self.done, self.total
+            )
+        self._unflushed = 0
+
+
+def run_comparison(
+    conn: sqlite3.Connection,
+    comparison_id: str,
+    cancel: threading.Event | None = None,
+) -> ComparisonRecord:
+    """Run a prepared comparison row to completion."""
+    record = store.get_comparison(conn, comparison_id)
+    if record is None:
+        raise ValueError(f"comparison {comparison_id!r} not found")
+    config = record.config
 
     resolved: dict[str, AgentSpec] = {}
     for pid in config.player_ids:
@@ -124,18 +201,21 @@ def run_comparison(
             raise ValueError(f"player {pid!r} not found")
         resolved[pid] = player.agent_spec
 
-    comparison_id = _new_id()
-    record = ComparisonRecord(id=comparison_id, config=config, status="running")
-    with conn:
-        insert_comparison(conn, record)
-
     pairs: list[PairResult] = []
     n_total = 0
+    progress = _ProgressTracker(
+        conn, comparison_id, record.progress_done, record.progress_total
+    )
+
     try:
+        if cancel is not None and cancel.is_set():
+            raise Cancelled()
         # Stable, deterministic pair ordering matches what the UI will render.
         # Per-pair seed is offset so re-running with the same seed reproduces
         # exact game sequences.
         for idx, (a_id, b_id) in enumerate(combinations(config.player_ids, 2)):
+            if cancel is not None and cancel.is_set():
+                raise Cancelled()
             eval_cfg = EvalConfig(
                 agent_a=resolved[a_id],
                 agent_b=resolved[b_id],
@@ -144,7 +224,7 @@ def run_comparison(
                 swap_sides=config.swap_sides,
                 seed=config.seed + idx * 10_000,
             )
-            ev = run_tournament(conn, eval_cfg)
+            ev = run_tournament(conn, eval_cfg, cancel=cancel, progress=progress)
             assert ev.summary is not None  # run_tournament raises rather than return summary=None
             pairs.append(
                 PairResult(
@@ -157,11 +237,28 @@ def run_comparison(
             )
             n_total += ev.summary.n_games
 
+        progress.flush()
         summary = ComparisonSummary(pairs=tuple(pairs), n_total_games=n_total)
         with conn:
             update_comparison(conn, comparison_id, "done", summary)
         return ComparisonRecord(
-            id=comparison_id, config=config, status="done", summary=summary
+            id=comparison_id,
+            config=config,
+            status="done",
+            summary=summary,
+            progress_done=progress.done,
+            progress_total=progress.total,
+        )
+    except Cancelled:
+        progress.flush()
+        with conn:
+            update_comparison(conn, comparison_id, "cancelled", None)
+        return ComparisonRecord(
+            id=comparison_id,
+            config=config,
+            status="cancelled",
+            progress_done=progress.done,
+            progress_total=progress.total,
         )
     except Exception:
         with conn:
@@ -169,7 +266,12 @@ def run_comparison(
         raise
 
 
-def run_tournament(conn: sqlite3.Connection, config: EvalConfig) -> EvalRecord:
+def run_tournament(
+    conn: sqlite3.Connection,
+    config: EvalConfig,
+    cancel: threading.Event | None = None,
+    progress: _ProgressTracker | None = None,
+) -> EvalRecord:
     eval_id = _new_id()
     record = EvalRecord(id=eval_id, config=config, status="running")
     with conn:
@@ -180,12 +282,16 @@ def run_tournament(conn: sqlite3.Connection, config: EvalConfig) -> EvalRecord:
     try:
         for spec in config.specs:
             for i in range(config.n_games_per_spec):
+                if cancel is not None and cancel.is_set():
+                    raise Cancelled()
                 a_is_x = not (config.swap_sides and i % 2 == 1)
                 x_agent = config.agent_a if a_is_x else config.agent_b
                 o_agent = config.agent_b if a_is_x else config.agent_a
                 game = play(spec, x_agent, o_agent, eval_id=eval_id, seed=config.seed + n)
                 with conn:
                     insert_game(conn, game)
+                if progress is not None:
+                    progress.bump()
                 a_score = game.outcome if a_is_x else -game.outcome
                 if a_score > 0:
                     a_wins += 1
@@ -205,6 +311,10 @@ def run_tournament(conn: sqlite3.Connection, config: EvalConfig) -> EvalRecord:
         with conn:
             update_eval(conn, eval_id, "done", summary)
         return EvalRecord(id=eval_id, config=config, status="done", summary=summary)
+    except Cancelled:
+        with conn:
+            update_eval(conn, eval_id, "cancelled", None)
+        raise
     except Exception:
         with conn:
             update_eval(conn, eval_id, "failed", None)

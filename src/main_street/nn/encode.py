@@ -24,6 +24,14 @@ from ..core import EMPTY, GameState, O, X
 _MARKS_SCALE: Final[float] = 12.0
 
 
+def to_device(
+    inputs: dict[str, torch.Tensor], device: torch.device
+) -> dict[str, torch.Tensor]:
+    if device.type == "cpu":
+        return inputs
+    return {k: v.to(device) for k, v in inputs.items()}
+
+
 ENCODERS: dict[str, type[Encoder]] = {}
 
 

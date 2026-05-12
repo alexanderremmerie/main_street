@@ -1,6 +1,7 @@
 {
   "name": "default",
   "seed": 0,
+  "device": "auto",
   "model": {
     "name": "simple_conv",
     "params": {"channels": 64, "n_blocks": 4, "kernel_size": 3}
@@ -35,7 +36,9 @@
     "lr": 1e-3,
     "weight_decay": 1e-4,
     "eval_every": 2,
-    "eval_n_simulations": 64
+    "eval_n_simulations": 64,
+    "eval_batch_size": 4096,
+    "eval_max_positions": 16384
   },
   "wandb": {
     "project": "main_street",

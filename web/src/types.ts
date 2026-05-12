@@ -1,5 +1,20 @@
 export type GameSpec = { n: number; schedule: number[] };
 
+export type SpecSamplerConfig = {
+  kind: "mixture";
+  n_min: number;
+  n_max: number;
+  turns_min: number;
+  turns_max: number;
+  fill_min: number;
+  fill_max: number;
+  max_marks_per_turn: number;
+  random_weight?: number;
+  arc_weight?: number;
+  few_big_weight?: number;
+  many_small_weight?: number;
+};
+
 export type AgentSpec =
   | { kind: "human" }
   | { kind: "random"; seed?: number | null }
@@ -75,6 +90,15 @@ export type PlayerRecord = {
   created_at: string;
 };
 
+export type CheckpointInfo = {
+  path: string;
+  run_id: string;
+  run_name: string;
+  label: string;
+  iter: number | null;
+  is_final: boolean;
+};
+
 export type PlayerVerdict = {
   player_id: string;
   label: string;
@@ -88,6 +112,25 @@ export type AnalyzeResponse = {
   oracle_value: -1 | 0 | 1 | null;
   oracle_best_cell: number | null;
   oracle_per_cell_values: Record<number, -1 | 0 | 1> | null;
+};
+
+export type InspectMove = {
+  cell: number;
+  raw_policy: number;
+  puct_visits: number;
+  puct_visit_prob: number;
+  puct_value: number | null;
+};
+
+export type InspectModelResponse = {
+  player_id: string;
+  label: string;
+  checkpoint_path: string;
+  current_player: 1 | 2;
+  raw_value: number;
+  puct_action: number;
+  n_simulations: number;
+  moves: InspectMove[];
 };
 
 export type OracleResponse = {
@@ -114,6 +157,8 @@ export type ComparisonSummary = {
 export type ComparisonConfig = {
   player_ids: string[];
   specs: GameSpec[];
+  spec_sampler?: SpecSamplerConfig | null;
+  n_sampled_specs?: number | null;
   n_games_per_spec: number;
   swap_sides: boolean;
   seed: number;
@@ -122,15 +167,17 @@ export type ComparisonConfig = {
 export type ComparisonRecord = {
   id: string;
   config: ComparisonConfig;
-  status: "pending" | "running" | "done" | "failed";
+  status: "running" | "done" | "failed" | "cancelling" | "cancelled";
   summary: ComparisonSummary | null;
+  progress_done: number;
+  progress_total: number;
   created_at: string;
 };
 
 export type EvalRecord = {
   id: string;
   config: EvalConfig;
-  status: "pending" | "running" | "done" | "failed";
+  status: "running" | "done" | "failed" | "cancelling" | "cancelled";
   summary: EvalSummary | null;
   created_at: string;
 };

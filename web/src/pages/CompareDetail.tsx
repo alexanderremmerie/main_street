@@ -11,6 +11,8 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, errorMessage } from "../api";
+import { comparisonProgress, formatSpec } from "../format";
+import { SecondaryButton } from "../components/Form";
 import { Notice } from "../components/Notice";
 import {
   DescriptionRow as Row,
@@ -31,6 +33,7 @@ export function CompareDetailPage() {
   const [rec, setRec] = useState<ComparisonRecord | null>(null);
   const [players, setPlayers] = useState<PlayerRecord[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [cancelBusy, setCancelBusy] = useState(false);
 
   useEffect(() => {
     if (!id) return;
@@ -49,11 +52,56 @@ export function CompareDetailPage() {
     };
   }, [id]);
 
+  // Poll while the comparison is unfinished. Keying the effect on
+  // `rec?.status` (not the whole record) keeps the interval alive across the
+  // many progress-tick rerenders that happen while running; we only tear it
+  // down when the status itself transitions to terminal.
+  const status = rec?.status;
+  useEffect(() => {
+    if (!id || !status || !["running", "cancelling"].includes(status)) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      api
+        .getComparison(id)
+        .then((r) =>
+          setRec((prev) =>
+            prev &&
+            prev.status === r.status &&
+            prev.progress_done === r.progress_done &&
+            prev.progress_total === r.progress_total &&
+            prev.summary === r.summary
+              ? prev
+              : r,
+          ),
+        )
+        .catch((e) => setError(errorMessage(e)));
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [id, status]);
+
   if (error) return <Notice kind="error">{error}</Notice>;
   if (!rec || !players) return <LoadingState>Loading comparison…</LoadingState>;
 
   const playerById = new Map(players.map((p) => [p.id, p]));
   const pairs = rec.summary?.pairs ?? [];
+  const canCancel = rec.status === "running";
+  const { done: progressDone, total: progressTotal, pct: progressPct } =
+    comparisonProgress(rec);
+
+  const cancel = async () => {
+    if (!id || !canCancel) return;
+    setCancelBusy(true);
+    setError(null);
+    try {
+      const updated = await api.cancelComparison(id);
+      setRec(updated);
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setCancelBusy(false);
+    }
+  };
 
   // Compute the leader once so we can highlight the top player in the stat tiles.
   const leader =
@@ -66,9 +114,16 @@ export function CompareDetailPage() {
         title="Comparison"
         description={<span className="font-mono text-xs">{rec.id}</span>}
         actions={
-          <Link to="/compare" className="text-xs text-neutral-500 hover:text-neutral-900">
-            ← new comparison
-          </Link>
+          <div className="flex items-center gap-2">
+            {canCancel && (
+              <SecondaryButton size="sm" onClick={cancel} disabled={cancelBusy}>
+                {cancelBusy ? "cancelling..." : "cancel"}
+              </SecondaryButton>
+            )}
+            <Link to="/compare" className="text-xs text-neutral-500 hover:text-neutral-900">
+              ← new comparison
+            </Link>
+          </div>
         }
       />
 
@@ -101,6 +156,20 @@ export function CompareDetailPage() {
             <TimeAgo iso={rec.created_at} />
           </span>
         </Row>
+        <Row label="Progress">
+          <div className="min-w-[16rem] max-w-lg flex-1">
+            <div className="h-2 border border-neutral-200 bg-neutral-50">
+              <div
+                className="h-full bg-neutral-900 transition-[width] duration-300"
+                style={{ width: `${progressPct}%` }}
+              />
+            </div>
+            <div className="mt-1 text-xs text-neutral-500 tabular-nums">
+              {progressDone} / {progressTotal} games
+              {progressTotal > 0 && ` · ${progressPct}%`}
+            </div>
+          </div>
+        </Row>
         <Row label="Players">
           <div className="flex flex-wrap gap-1.5 text-xs">
             {rec.config.player_ids.map((pid) => (
@@ -115,13 +184,26 @@ export function CompareDetailPage() {
         </Row>
         <Row label="Specs">
           <div className="font-mono text-sm flex flex-wrap gap-x-4 gap-y-1">
-            {rec.config.specs.map((sp, i) => (
-              <span key={i}>
-                N={sp.n} [{sp.schedule.join(",")}]
-              </span>
+            {rec.config.specs.slice(0, 20).map((sp, i) => (
+              <span key={i}>{formatSpec(sp)}</span>
             ))}
+            {rec.config.specs.length > 20 && (
+              <span className="text-neutral-400">
+                +{rec.config.specs.length - 20} more
+              </span>
+            )}
           </div>
         </Row>
+        {rec.config.spec_sampler && (
+          <Row label="Spec source">
+            <span className="text-sm text-neutral-700">
+              sampled {rec.config.n_sampled_specs} specs, N={rec.config.spec_sampler.n_min}
+              -{rec.config.spec_sampler.n_max}, turns={rec.config.spec_sampler.turns_min}
+              -{rec.config.spec_sampler.turns_max}, fill={rec.config.spec_sampler.fill_min}
+              -{rec.config.spec_sampler.fill_max}
+            </span>
+          </Row>
+        )}
         <Row label="Configuration">
           <span className="text-sm text-neutral-700">
             {rec.config.n_games_per_spec} games per (spec, pair),{" "}
@@ -137,7 +219,11 @@ export function CompareDetailPage() {
           pairs={pairs}
         />
       ) : rec.status === "running" ? (
-        <Notice kind="info">Comparison is still running. Reload to see the matrix.</Notice>
+        <Notice kind="info">Comparison is running. This page updates automatically.</Notice>
+      ) : rec.status === "cancelling" ? (
+        <Notice kind="info">Cancellation requested. The worker will stop after the current game.</Notice>
+      ) : rec.status === "cancelled" ? (
+        <Notice kind="info">Comparison was cancelled.</Notice>
       ) : (
         <Notice kind="error">Comparison failed; no matrix available.</Notice>
       )}
@@ -350,4 +436,3 @@ function MatrixCell({ cell }: { cell: { winrate: number; eval_id: string; n_game
     </Link>
   );
 }
-

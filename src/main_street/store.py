@@ -82,6 +82,8 @@ CREATE TABLE IF NOT EXISTS comparisons (
     config      TEXT NOT NULL,
     status      TEXT NOT NULL,
     summary     TEXT,
+    progress_done  INTEGER NOT NULL,
+    progress_total INTEGER NOT NULL,
     created_at  TEXT NOT NULL
 );
 
@@ -376,18 +378,26 @@ def _row_to_comparison(row: sqlite3.Row) -> ComparisonRecord:
         summary=(
             ComparisonSummary.model_validate_json(row["summary"]) if row["summary"] else None
         ),
+        progress_done=row["progress_done"],
+        progress_total=row["progress_total"],
         created_at=row["created_at"],
     )
 
 
 def insert_comparison(conn: sqlite3.Connection, r: ComparisonRecord) -> None:
     conn.execute(
-        "INSERT INTO comparisons VALUES (?,?,?,?,?)",
+        """
+        INSERT INTO comparisons
+          (id, config, status, summary, progress_done, progress_total, created_at)
+        VALUES (?,?,?,?,?,?,?)
+        """,
         (
             r.id,
             r.config.model_dump_json(),
             r.status,
             r.summary.model_dump_json() if r.summary else None,
+            r.progress_done,
+            r.progress_total,
             r.created_at.isoformat(),
         ),
     )
@@ -403,6 +413,30 @@ def update_comparison(
         "UPDATE comparisons SET status = ?, summary = ? WHERE id = ?",
         (status, summary.model_dump_json() if summary else None, comparison_id),
     )
+
+
+def update_comparison_progress(
+    conn: sqlite3.Connection,
+    comparison_id: str,
+    progress_done: int,
+    progress_total: int,
+) -> None:
+    conn.execute(
+        "UPDATE comparisons SET progress_done = ?, progress_total = ? WHERE id = ?",
+        (progress_done, progress_total, comparison_id),
+    )
+
+
+def request_comparison_cancel(conn: sqlite3.Connection, comparison_id: str) -> bool:
+    cur = conn.execute(
+        """
+        UPDATE comparisons
+        SET status = 'cancelling'
+        WHERE id = ? AND status = 'running'
+        """,
+        (comparison_id,),
+    )
+    return cur.rowcount > 0
 
 
 def get_comparison(conn: sqlite3.Connection, comparison_id: str) -> ComparisonRecord | None:

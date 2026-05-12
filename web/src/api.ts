@@ -1,14 +1,17 @@
 import type {
   AgentSpec,
   AnalyzeResponse,
+  CheckpointInfo,
   ComparisonConfig,
   ComparisonRecord,
   EvalConfig,
   EvalRecord,
   GameRecord,
   GameSpec,
+  InspectModelResponse,
   OracleResponse,
   PlayerRecord,
+  SpecSamplerConfig,
   SpecSummary,
 } from "./types";
 
@@ -100,8 +103,11 @@ export const api = {
     req<{ cell: number }>("/api/move", { method: "POST", body: JSON.stringify(body) }),
 
   listSpecs: () => req<SpecSummary[]>("/api/specs"),
+  sampleSpecs: (body: { sampler: SpecSamplerConfig; count: number; seed: number }) =>
+    req<GameSpec[]>("/api/specs/sample", { method: "POST", body: JSON.stringify(body) }),
 
   listPlayers: () => req<PlayerRecord[]>("/api/players"),
+  listCheckpoints: () => req<CheckpointInfo[]>("/api/checkpoints"),
   createPlayer: (body: { label: string; agent_spec: AgentSpec }) =>
     req<PlayerRecord>("/api/players", { method: "POST", body: JSON.stringify(body) }),
   deletePlayer: (id: string) =>
@@ -111,6 +117,16 @@ export const api = {
    *  The oracle is included automatically when the spec is small enough. */
   analyze: (body: { spec: GameSpec; actions: number[]; player_ids: string[] }) =>
     req<AnalyzeResponse>("/api/analyze", { method: "POST", body: JSON.stringify(body) }),
+  inspectModel: (body: {
+    spec: GameSpec;
+    actions: number[];
+    player_id: string;
+    n_simulations: number;
+  }) =>
+    req<InspectModelResponse>("/api/inspect-model", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 
   listEvals: () => req<EvalRecord[]>("/api/evals"),
   getEval: (id: string) => req<EvalRecord>(`/api/evals/${id}`),
@@ -121,4 +137,6 @@ export const api = {
   getComparison: (id: string) => req<ComparisonRecord>(`/api/comparisons/${id}`),
   runComparison: (cfg: ComparisonConfig) =>
     req<ComparisonRecord>("/api/comparisons", { method: "POST", body: JSON.stringify(cfg) }),
+  cancelComparison: (id: string) =>
+    req<ComparisonRecord>(`/api/comparisons/${id}/cancel`, { method: "POST" }),
 };

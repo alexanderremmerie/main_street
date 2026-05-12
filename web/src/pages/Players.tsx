@@ -7,13 +7,14 @@ import {
   FormRow,
   PrimaryButton,
   SecondaryButton,
+  Select,
   TextInput,
 } from "../components/Form";
 import { Notice } from "../components/Notice";
 import { LoadingState, PageHeader, SectionHeader } from "../components/Page";
 import { Td, Th } from "../components/Tables";
 import { formatAgent } from "../format";
-import type { AgentSpec, PlayerRecord } from "../types";
+import type { AgentSpec, CheckpointInfo, PlayerRecord } from "../types";
 
 export function PlayersPage() {
   const [players, setPlayers] = useState<PlayerRecord[] | null>(null);
@@ -133,7 +134,23 @@ function NewPlayerForm({
 }) {
   const [label, setLabel] = useState("");
   const [agent, setAgent] = useState<AgentSpec>({ kind: "greedy", seed: 1 });
+  const [checkpoints, setCheckpoints] = useState<CheckpointInfo[] | null>(null);
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .listCheckpoints()
+      .then((items) => {
+        if (!cancelled) setCheckpoints(items);
+      })
+      .catch(() => {
+        if (!cancelled) setCheckpoints([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const submit = async () => {
     if (!label.trim()) return;
@@ -157,6 +174,23 @@ function NewPlayerForm({
       <FormRow label="Agent">
         <AgentField value={agent} onChange={setAgent} allowHuman={false} />
       </FormRow>
+      {agent.kind === "alphazero" && checkpoints && checkpoints.length > 0 && (
+        <FormRow label="Checkpoint">
+          <Select
+            value={agent.checkpoint_path}
+            options={[
+              { value: "", label: "choose checkpoint" },
+              ...checkpoints.map((c) => ({ value: c.path, label: c.label })),
+            ]}
+            width="w-96"
+            onChange={(path) => {
+              setAgent({ ...agent, checkpoint_path: path });
+              const ckpt = checkpoints.find((c) => c.path === path);
+              if (ckpt && !label.trim()) setLabel(`AlphaZero ${ckpt.label}`);
+            }}
+          />
+        </FormRow>
+      )}
       <FormFooter>
         <span className="text-xs text-neutral-500">
           Defaults are seeded automatically. Add a player for any agent + parameter

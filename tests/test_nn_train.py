@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
+
 from main_street.agents import AlphaZeroAgentSpec, build
 from main_street.core import GameSpec, GameState
 from main_street.eval.positions import (
@@ -25,6 +27,35 @@ from main_street.nn.train import (
     Trainer,
     WandbConfig,
 )
+
+
+def test_selfplay_spec_sampler_generates_valid_range():
+    cfg = SelfPlaySourceConfig(
+        weight=1.0,
+        spec_sampler={
+            "kind": "mixture",
+            "n_min": 12,
+            "n_max": 24,
+            "turns_min": 3,
+            "turns_max": 8,
+            "fill_min": 0.6,
+            "fill_max": 0.95,
+            "max_marks_per_turn": 6,
+        },
+        games_per_iter=1,
+        n_simulations=1,
+    )
+    src = cfg.build()
+    rng = np.random.default_rng(0)
+    seen: set[tuple[int, tuple[int, ...]]] = set()
+    for _ in range(200):
+        spec = src._sample_spec(rng)
+        seen.add((spec.n, spec.schedule))
+        assert 12 <= spec.n <= 24
+        assert 3 <= len(spec.schedule) <= 8
+        assert sum(spec.schedule) <= spec.n
+        assert all(1 <= k <= 6 for k in spec.schedule)
+    assert len(seen) > 50
 
 
 def test_trainer_runs_end_to_end(tmp_path, monkeypatch):

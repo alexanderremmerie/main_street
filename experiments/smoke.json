@@ -1,6 +1,7 @@
 {
   "name": "smoke",
   "seed": 0,
+  "device": "auto",
   "model": {
     "name": "simple_conv",
     "params": {"channels": 32, "n_blocks": 2, "kernel_size": 3}
@@ -27,7 +28,9 @@
     "lr": 1e-3,
     "weight_decay": 1e-4,
     "eval_every": 1,
-    "eval_n_simulations": 16
+    "eval_n_simulations": 16,
+    "eval_batch_size": 1024,
+    "eval_max_positions": 1024
   },
   "wandb": {
     "project": "main_street",

@@ -1,0 +1,55 @@
+{
+  "name": "selfplay_8h",
+  "seed": 20260512,
+  "device": "auto",
+  "model": {
+    "name": "simple_conv",
+    "params": {"channels": 64, "n_blocks": 4, "kernel_size": 3}
+  },
+  "encoder": {"name": "default", "max_n": 32, "max_turns": 12},
+  "data": {
+    "sources": [
+      {"kind": "supervised", "weight": 0.10, "set": "train_small"},
+      {
+        "kind": "selfplay",
+        "weight": 0.90,
+        "spec_sampler": {
+          "kind": "mixture",
+          "n_min": 8,
+          "n_max": 32,
+          "turns_min": 4,
+          "turns_max": 12,
+          "fill_min": 0.55,
+          "fill_max": 0.95,
+          "max_marks_per_turn": 8,
+          "random_weight": 0.40,
+          "arc_weight": 0.25,
+          "few_big_weight": 0.20,
+          "many_small_weight": 0.15
+        },
+        "games_per_iter": 40,
+        "n_simulations": 64,
+        "c_puct": 1.5,
+        "dirichlet_alpha": 0.3,
+        "dirichlet_eps": 0.25,
+        "temperature_moves": 8,
+        "capacity": 500000
+      }
+    ]
+  },
+  "loop": {
+    "iters": 600,
+    "steps_per_iter": 250,
+    "batch_size": 512,
+    "lr": 7e-4,
+    "weight_decay": 1e-4,
+    "eval_every": 25,
+    "eval_n_simulations": 64,
+    "eval_batch_size": 4096,
+    "eval_max_positions": 8192
+  },
+  "wandb": {
+    "project": "main_street",
+    "mode": "online"
+  }
+}

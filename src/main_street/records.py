@@ -5,12 +5,13 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .agents import AgentSpec
 from .core import GameSpec
+from .spec_sampling import SpecSamplerConfig
 
-Status = Literal["running", "done", "failed"]
+Status = Literal["running", "done", "failed", "cancelling", "cancelled"]
 
 
 def _now() -> datetime:
@@ -91,10 +92,22 @@ class ComparisonConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     player_ids: tuple[str, ...] = Field(min_length=2)
-    specs: tuple[GameSpec, ...] = Field(min_length=1)
+    specs: tuple[GameSpec, ...] = ()
+    spec_sampler: SpecSamplerConfig | None = None
+    n_sampled_specs: int | None = Field(default=None, gt=0)
     n_games_per_spec: int = Field(gt=0)
     swap_sides: bool = True
     seed: int = 0
+
+    @model_validator(mode="after")
+    def _check_specs(self) -> ComparisonConfig:
+        has_fixed = len(self.specs) > 0
+        has_sampler = self.spec_sampler is not None or self.n_sampled_specs is not None
+        if not has_fixed and not has_sampler:
+            raise ValueError("provide fixed specs or both spec_sampler and n_sampled_specs")
+        if has_sampler and (self.spec_sampler is None or self.n_sampled_specs is None):
+            raise ValueError("spec_sampler and n_sampled_specs must be provided together")
+        return self
 
 
 class ComparisonRecord(BaseModel):
@@ -104,6 +117,8 @@ class ComparisonRecord(BaseModel):
     config: ComparisonConfig
     status: Status
     summary: ComparisonSummary | None = None
+    progress_done: int = Field(default=0, ge=0)
+    progress_total: int = Field(default=0, ge=0)
     created_at: datetime = Field(default_factory=_now)
 
 

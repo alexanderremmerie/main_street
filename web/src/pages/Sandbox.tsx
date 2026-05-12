@@ -11,6 +11,7 @@ import {
   NumberInput,
   PrimaryButton,
   SecondaryButton,
+  Select,
   TextInput,
 } from "../components/Form";
 import { Mark } from "../components/Mark";
@@ -22,9 +23,27 @@ import { formatAgent, formatSpec } from "../format";
 import { statesAlong, winner } from "../game";
 import { useOracle } from "../oracle";
 import { parseSchedule } from "../schedule";
-import type { AgentSpec, GameSpec } from "../types";
+import type { AgentSpec, GameSpec, PlayerRecord } from "../types";
 
 type Phase = "config" | "playing" | "terminal";
+type Seat =
+  | { kind: "human" }
+  | { kind: "player"; playerId: string }
+  | { kind: "custom"; agent: AgentSpec };
+
+const HUMAN_AGENT: AgentSpec = { kind: "human" };
+
+function seatAgent(seat: Seat, players: PlayerRecord[] | null): AgentSpec {
+  if (seat.kind === "human") return HUMAN_AGENT;
+  if (seat.kind === "custom") return seat.agent;
+  return players?.find((p) => p.id === seat.playerId)?.agent_spec ?? HUMAN_AGENT;
+}
+
+function seatLabel(seat: Seat, players: PlayerRecord[] | null): string {
+  if (seat.kind === "human") return "Human";
+  if (seat.kind === "custom") return formatAgent(seat.agent);
+  return players?.find((p) => p.id === seat.playerId)?.label ?? "(missing player)";
+}
 
 export function SandboxPanel() {
   const nav = useNavigate();
@@ -34,8 +53,9 @@ export function SandboxPanel() {
   // playable in seconds.
   const [n, setN] = useState(14);
   const [scheduleText, setScheduleText] = useState("1,2,3,3,2,1");
-  const [xAgent, setXAgent] = useState<AgentSpec>({ kind: "human" });
-  const [oAgent, setOAgent] = useState<AgentSpec>({ kind: "alphabeta", depth: 4 });
+  const [players, setPlayers] = useState<PlayerRecord[] | null>(null);
+  const [xSeat, setXSeat] = useState<Seat>({ kind: "human" });
+  const [oSeat, setOSeat] = useState<Seat>({ kind: "player", playerId: "p_alphabeta_4" });
 
   const [phase, setPhase] = useState<Phase>("config");
   const [actions, setActions] = useState<number[]>([]);
@@ -48,15 +68,36 @@ export function SandboxPanel() {
   const sum = schedule?.reduce((a, b) => a + b, 0) ?? 0;
   const configValid = schedule !== null && n > 0 && sum <= n;
 
-  const spec: GameSpec | null = configValid ? { n, schedule: schedule! } : null;
+  const spec: GameSpec | null = useMemo(
+    () => (configValid ? { n, schedule: schedule! } : null),
+    [configValid, n, schedule],
+  );
+  const xAgent = seatAgent(xSeat, players);
+  const oAgent = seatAgent(oSeat, players);
+  const xLabel = seatLabel(xSeat, players);
+  const oLabel = seatLabel(oSeat, players);
   const states = useMemo(
     () => (spec && phase !== "config" ? statesAlong(spec, actions) : null),
     [spec, actions, phase],
   );
   const state = states?.[states.length - 1] ?? null;
+  const displayPhase: Phase =
+    phase === "playing" && state?.isTerminal ? "terminal" : phase;
   const currentAgent =
     state && !state.isTerminal ? (state.currentPlayer === 1 ? xAgent : oAgent) : null;
   const lastAction = actions.length > 0 ? actions[actions.length - 1] : null;
+  const botMove = useMemo(
+    () =>
+      phase === "playing" &&
+      spec &&
+      state &&
+      !state.isTerminal &&
+      currentAgent &&
+      currentAgent.kind !== "human"
+        ? { spec, actions, agent: currentAgent }
+        : null,
+    [phase, spec, state, currentAgent, actions],
+  );
 
   const oracle = useOracle(
     spec && phase !== "config" ? { spec, actions } : null,
@@ -68,17 +109,27 @@ export function SandboxPanel() {
       : undefined;
 
   useEffect(() => {
-    if (phase === "playing" && state?.isTerminal) setPhase("terminal");
-  }, [phase, state?.isTerminal]);
+    let cancelled = false;
+    api
+      .listPlayers()
+      .then((ps) => {
+        if (!cancelled) setPlayers(ps);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(errorMessage(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // When the current player is a bot, ask the server for its move and append.
   useEffect(() => {
-    if (phase !== "playing" || !spec || !state || !currentAgent) return;
-    if (state.isTerminal || currentAgent.kind === "human") return;
+    if (!botMove) return;
 
     let cancelled = false;
     api
-      .computeMove({ spec, actions, agent: currentAgent })
+      .computeMove(botMove)
       .then(({ cell }) => {
         if (cancelled) return;
         setActions((prev) => [...prev, cell]);
@@ -90,9 +141,7 @@ export function SandboxPanel() {
     return () => {
       cancelled = true;
     };
-    // Keyed on actions.length (not identity) so we re-fire only after a move
-    // completes; agent/spec changes are gated by `phase === "playing"`.
-  }, [phase, actions.length, currentAgent?.kind, spec?.n]);
+  }, [botMove]);
 
   const onCellClick = (cell: number) => {
     if (phase !== "playing" || !state || state.isTerminal) return;
@@ -116,8 +165,26 @@ export function SandboxPanel() {
     setPhase("config");
   };
 
+  const swapSeats = () => {
+    setXSeat(oSeat);
+    setOSeat(xSeat);
+    setActions([]);
+    setError(null);
+    setSavedAs(null);
+    setPhase("config");
+  };
+
+  const rematchSwapped = () => {
+    setXSeat(oSeat);
+    setOSeat(xSeat);
+    setActions([]);
+    setError(null);
+    setSavedAs(null);
+    setPhase("playing");
+  };
+
   const save = async () => {
-    if (!spec || phase !== "terminal") return;
+    if (!spec || !state?.isTerminal) return;
     setSaving(true);
     setError(null);
     try {
@@ -154,28 +221,41 @@ export function SandboxPanel() {
             />
           </FormRow>
           <FormRow label="X first">
-            <AgentField value={xAgent} onChange={setXAgent} />
+            <SeatField
+              value={xSeat}
+              onChange={setXSeat}
+              players={players}
+              allowHuman
+            />
           </FormRow>
           <FormRow label="O second">
-            <AgentField value={oAgent} onChange={setOAgent} />
+            <SeatField
+              value={oSeat}
+              onChange={setOSeat}
+              players={players}
+              allowHuman
+            />
           </FormRow>
           <FormFooter>
             <span className="text-xs text-neutral-500">
-              {formatAgent(xAgent)} (X) vs {formatAgent(oAgent)} (O)
+              {xLabel} (X) vs {oLabel} (O)
             </span>
-            <PrimaryButton onClick={start} disabled={!configValid}>
-              Start
-            </PrimaryButton>
+            <div className="flex items-center gap-2">
+              <SecondaryButton onClick={swapSeats}>swap X/O</SecondaryButton>
+              <PrimaryButton onClick={start} disabled={!configValid}>
+                Start
+              </PrimaryButton>
+            </div>
           </FormFooter>
         </FormBox>
       </div>
     );
   }
 
-  // phase === "playing" || "terminal"
+  // displayPhase === "playing" || "terminal"
   if (!spec || !state) return null;
   const turnLabel = describeTurn({
-    phase,
+    phase: displayPhase,
     state,
     currentAgent,
     xAgent,
@@ -186,9 +266,12 @@ export function SandboxPanel() {
     <div className="space-y-6">
       <SummaryBar
         spec={spec}
+        xLabel={xLabel}
+        oLabel={oLabel}
         xAgent={xAgent}
         oAgent={oAgent}
         onReset={reset}
+        onSwap={swapSeats}
       />
 
       <Schedule
@@ -221,13 +304,13 @@ export function SandboxPanel() {
 
       {showOracle && <OraclePanel result={oracle} />}
 
-      {phase === "terminal" && (
+      {displayPhase === "terminal" && (
         <Outcome state={state} outcome={winner(state.board)} />
       )}
 
       {error && <Notice kind="error">{error}</Notice>}
 
-      {phase === "terminal" && (
+      {displayPhase === "terminal" && (
         <div className="flex items-center gap-3">
           {savedAs ? (
             <span className="text-sm text-neutral-700">
@@ -251,37 +334,97 @@ export function SandboxPanel() {
               {saving ? "Saving..." : "Save game"}
             </PrimaryButton>
           )}
+          <SecondaryButton onClick={rematchSwapped}>rematch swapped</SecondaryButton>
         </div>
       )}
     </div>
   );
 }
 
+function SeatField({
+  value,
+  onChange,
+  players,
+  allowHuman,
+}: {
+  value: Seat;
+  onChange: (seat: Seat) => void;
+  players: PlayerRecord[] | null;
+  allowHuman: boolean;
+}) {
+  const selectValue =
+    value.kind === "human"
+      ? "__human"
+      : value.kind === "custom"
+        ? "__custom"
+        : value.playerId;
+  const options = [
+    ...(allowHuman ? [{ value: "__human", label: "Human" }] : []),
+    ...(players ?? []).map((p) => ({ value: p.id, label: p.label })),
+    { value: "__custom", label: "Custom agent..." },
+  ];
+  return (
+    <>
+      <Select
+        value={selectValue}
+        options={options}
+        width="w-56"
+        onChange={(next) => {
+          if (next === "__human") onChange({ kind: "human" });
+          else if (next === "__custom") {
+            onChange({ kind: "custom", agent: { kind: "greedy", seed: 0 } });
+          }
+          else onChange({ kind: "player", playerId: next });
+        }}
+      />
+      {value.kind === "custom" && (
+        <AgentField
+          value={value.agent}
+          onChange={(agent) => onChange({ kind: "custom", agent })}
+          allowHuman={allowHuman}
+        />
+      )}
+      {players === null && (
+        <span className="text-xs text-neutral-400">loading players</span>
+      )}
+    </>
+  );
+}
+
 function SummaryBar({
   spec,
+  xLabel,
+  oLabel,
   xAgent,
   oAgent,
   onReset,
+  onSwap,
 }: {
   spec: GameSpec;
+  xLabel: string;
+  oLabel: string;
   xAgent: AgentSpec;
   oAgent: AgentSpec;
   onReset: () => void;
+  onSwap: () => void;
 }) {
   return (
     <div className="flex items-center gap-3 flex-wrap text-sm border border-neutral-200 bg-white px-3 py-2">
       <span className="flex items-center gap-2">
         <Mark player="X" />
-        <span className="font-mono text-xs">{formatAgent(xAgent)}</span>
+        <span className="text-xs text-neutral-900">{xLabel}</span>
+        <span className="font-mono text-xs text-neutral-500">{formatAgent(xAgent)}</span>
       </span>
       <span className="text-neutral-300">vs</span>
       <span className="flex items-center gap-2">
         <Mark player="O" />
-        <span className="font-mono text-xs">{formatAgent(oAgent)}</span>
+        <span className="text-xs text-neutral-900">{oLabel}</span>
+        <span className="font-mono text-xs text-neutral-500">{formatAgent(oAgent)}</span>
       </span>
       <span className="text-neutral-300">·</span>
       <span className="font-mono text-xs text-neutral-500">{formatSpec(spec)}</span>
-      <div className="ml-auto">
+      <div className="ml-auto flex items-center gap-2">
+        <SecondaryButton onClick={onSwap} size="sm">swap X/O</SecondaryButton>
         <SecondaryButton onClick={onReset} size="sm">reset</SecondaryButton>
       </div>
     </div>
@@ -323,4 +466,3 @@ function describeTurn({
     </span>
   );
 }
-

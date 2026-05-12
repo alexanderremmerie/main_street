@@ -17,6 +17,14 @@ export type AgentSpec =
       exploration_c?: number;
       seed?: number | null;
       rollout?: "random" | "forkaware";
+    }
+  | {
+      kind: "alphazero";
+      checkpoint_path: string;
+      n_simulations?: number;
+      c_puct?: number;
+      temperature?: number;
+      seed?: number | null;
     };
 
 export type AgentKind = AgentSpec["kind"];

@@ -37,5 +37,10 @@ export function formatAgent(spec: AgentSpec): string {
       const r = spec.rollout ?? "random";
       return `mcts sims=${spec.n_simulations ?? 200} ${r} ${formatSeed(spec.seed)}`;
     }
+    case "alphazero": {
+      // Show only the trailing path component so the label stays readable.
+      const tail = spec.checkpoint_path.split("/").slice(-2).join("/");
+      return `alphazero sims=${spec.n_simulations ?? 200} ckpt=${tail}`;
+    }
   }
 }

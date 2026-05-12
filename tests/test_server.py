@@ -27,6 +27,7 @@ def test_agents_lists_all_kinds(tmp_path: Path):
         "forkaware",
         "potentialaware",
         "mcts",
+        "alphazero",
     }
 
 

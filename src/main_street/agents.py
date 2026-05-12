@@ -98,6 +98,22 @@ class HumanAgentSpec(_Spec):
     kind: Literal["human"] = "human"
 
 
+class AlphaZeroAgentSpec(_Spec):
+    """Trained PUCT agent. Identified by the checkpoint it loads; everything
+    else (n_simulations, c_puct, temperature) is at-inference behavior."""
+
+    kind: Literal["alphazero"] = "alphazero"
+    checkpoint_path: str = Field(description="Path to a .pt checkpoint.")
+    n_simulations: int = Field(default=200, gt=0)
+    c_puct: float = Field(default=1.5, gt=0)
+    temperature: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="0 = argmax visit counts; >0 = sample from visit distribution.",
+    )
+    seed: int | None = None
+
+
 AgentSpec = Annotated[
     RandomAgentSpec
     | GreedyAgentSpec
@@ -109,7 +125,8 @@ AgentSpec = Annotated[
     | ForkAwareAgentSpec
     | PotentialAwareAgentSpec
     | MCTSAgentSpec
-    | HumanAgentSpec,
+    | HumanAgentSpec
+    | AlphaZeroAgentSpec,
     Field(discriminator="kind"),
 ]
 
@@ -126,6 +143,7 @@ KINDS: tuple[str, ...] = (
     "forkaware",
     "potentialaware",
     "mcts",
+    "alphazero",
 )
 SPEC_TYPES: dict[str, type[BaseModel]] = {
     "human": HumanAgentSpec,
@@ -139,6 +157,7 @@ SPEC_TYPES: dict[str, type[BaseModel]] = {
     "forkaware": ForkAwareAgentSpec,
     "potentialaware": PotentialAwareAgentSpec,
     "mcts": MCTSAgentSpec,
+    "alphazero": AlphaZeroAgentSpec,
 }
 
 LABELS: dict[str, str] = {
@@ -153,6 +172,7 @@ LABELS: dict[str, str] = {
     "forkaware": "ForkAware",
     "potentialaware": "PotentialAware",
     "mcts": "MCTS (UCT)",
+    "alphazero": "AlphaZero",
 }
 
 
@@ -616,4 +636,16 @@ def build(spec: AgentSpec) -> Agent:
         )
     if isinstance(spec, HumanAgentSpec):
         raise ValueError("human agents act in the client; cannot build a server agent")
+    if isinstance(spec, AlphaZeroAgentSpec):
+        # Lazy import so callers that only use classical baselines don't pay
+        # the torch import cost.
+        from .nn.agent import build_alphazero
+
+        return build_alphazero(
+            checkpoint_path=spec.checkpoint_path,
+            n_simulations=spec.n_simulations,
+            c_puct=spec.c_puct,
+            temperature=spec.temperature,
+            seed=spec.seed,
+        )
     raise ValueError(f"unknown spec: {spec!r}")

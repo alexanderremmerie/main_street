@@ -1,0 +1,36 @@
+{
+  "name": "smoke",
+  "seed": 0,
+  "model": {
+    "name": "simple_conv",
+    "params": {"channels": 32, "n_blocks": 2, "kernel_size": 3}
+  },
+  "encoder": {"name": "default", "max_n": 14, "max_turns": 12},
+  "data": {
+    "sources": [
+      {"kind": "supervised", "weight": 0.7, "set": "train_small"},
+      {
+        "kind": "selfplay",
+        "weight": 0.3,
+        "specs": [[6, [2, 3]], [9, [3, 4]], [10, [4, 4]]],
+        "games_per_iter": 4,
+        "n_simulations": 16,
+        "temperature_moves": 3,
+        "capacity": 5000
+      }
+    ]
+  },
+  "loop": {
+    "iters": 3,
+    "steps_per_iter": 30,
+    "batch_size": 128,
+    "lr": 1e-3,
+    "weight_decay": 1e-4,
+    "eval_every": 1,
+    "eval_n_simulations": 16
+  },
+  "wandb": {
+    "project": "main_street",
+    "mode": "disabled"
+  }
+}

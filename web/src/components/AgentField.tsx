@@ -1,5 +1,5 @@
 import type { AgentSpec } from "../types";
-import { NumberInput, Select } from "./Form";
+import { NumberInput, Select, TextInput } from "./Form";
 
 const MCTS_ROLLOUT_OPTIONS: { value: "random" | "forkaware"; label: string }[] = [
   { value: "random", label: "random" },
@@ -18,6 +18,7 @@ const KINDS: { value: AgentSpec["kind"]; label: string }[] = [
   { value: "potentialaware", label: "PotentialAware" },
   { value: "mcts", label: "MCTS (UCT)" },
   { value: "alphabeta", label: "Alpha-Beta" },
+  { value: "alphazero", label: "AlphaZero" },
 ];
 
 const KINDS_BOT_ONLY = KINDS.filter((k) => k.value !== "human");
@@ -53,6 +54,15 @@ export function AgentField({
         break;
       case "alphabeta":
         onChange({ kind: "alphabeta", depth: 4 });
+        break;
+      case "alphazero":
+        onChange({
+          kind: "alphazero",
+          checkpoint_path: "",
+          n_simulations: 64,
+          c_puct: 1.5,
+          temperature: 0,
+        });
         break;
     }
   };
@@ -106,6 +116,33 @@ export function AgentField({
             <NumberInput
               value={value.seed ?? 0}
               onChange={(n) => onChange({ ...value, seed: n ?? 0 })}
+            />
+          </Param>
+        </>
+      )}
+      {value.kind === "alphazero" && (
+        <>
+          <Param label="ckpt">
+            <TextInput
+              value={value.checkpoint_path}
+              placeholder="data/runs/.../final.pt"
+              width="w-80"
+              mono
+              onChange={(s) => onChange({ ...value, checkpoint_path: s })}
+            />
+          </Param>
+          <Param label="sims">
+            <NumberInput
+              value={value.n_simulations ?? 64}
+              onChange={(n) => onChange({ ...value, n_simulations: n ?? 1 })}
+            />
+          </Param>
+          <Param label="temp">
+            <NumberInput
+              value={value.temperature ?? 0}
+              onChange={(n) =>
+                onChange({ ...value, temperature: n ?? 0 })
+              }
             />
           </Param>
         </>

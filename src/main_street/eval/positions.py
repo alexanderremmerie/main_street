@@ -21,8 +21,8 @@ from typing import Final, Literal
 
 import numpy as np
 
-from ..core import EMPTY, GameSpec, GameState
-from ..solve import Solver, reachable_states
+from ..core import EMPTY, GameSpec, GameState, legal_actions, step
+from ..solve import Solver
 
 SourceMode = Literal["all_reachable", "initial_only"]
 
@@ -152,7 +152,36 @@ class SourceSpec:
 
     spec: GameSpec
     mode: SourceMode = "all_reachable"
+    prefix_actions: tuple[int, ...] = ()
     label: str = ""  # optional tag attached to every position from this source
+
+
+def _root_state(src: SourceSpec) -> GameState:
+    """Apply an optional prefix and return the rooted state for this source."""
+    state = GameState.initial(src.spec)
+    for action in src.prefix_actions:
+        state = step(state, int(action))
+    if state.is_terminal:
+        raise ValueError(
+            f"source {src.label or src.spec} prefix reaches terminal state: "
+            f"{src.prefix_actions}"
+        )
+    return state
+
+
+def _reachable_from_state(root: GameState) -> Iterable[GameState]:
+    """DFS traversal from an arbitrary rooted state, deduplicated by state."""
+    seen: set[GameState] = set()
+    stack: list[GameState] = [root]
+    while stack:
+        state = stack.pop()
+        if state in seen:
+            continue
+        seen.add(state)
+        yield state
+        if not state.is_terminal:
+            for cell in legal_actions(state):
+                stack.append(step(state, int(cell)))
 
 
 def build_position_set(name: str, sources: Iterable[SourceSpec]) -> PositionSet:
@@ -177,10 +206,11 @@ def build_position_set(name: str, sources: Iterable[SourceSpec]) -> PositionSet:
 
     for si, src in enumerate(sources):
         solver = Solver()
+        root = _root_state(src)
         if src.mode == "initial_only":
-            states: Iterable[GameState] = [GameState.initial(src.spec)]
+            states: Iterable[GameState] = [root]
         else:
-            states = (s for s in reachable_states(src.spec) if not s.is_terminal)
+            states = (s for s in _reachable_from_state(root) if not s.is_terminal)
         for s in states:
             value, mask = _label(solver, s)
             spec_idx_l.append(si)

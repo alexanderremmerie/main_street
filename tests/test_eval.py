@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 
 from main_street.agents import AlphaBetaAgentSpec, RandomAgentSpec, build
-from main_street.core import GameSpec
+from main_street.core import GameSpec, final_state
 from main_street.eval.metrics import score_agent
 from main_street.eval.positions import (
     PositionSet,
@@ -75,3 +75,28 @@ def test_diagnostics_labels_propagate():
     agent = build(AlphaBetaAgentSpec())
     score = score_agent(agent, ps, agent_label="alphabeta")
     assert score.per_label == {"diag_a": True, "diag_b": True}
+
+
+def test_prefix_actions_root_custom_state():
+    spec = GameSpec(n=8, schedule=(2, 3, 2))
+    prefix = (6, 7, 3, 4, 5)
+    ps = build_position_set(
+        "prefix_probe",
+        [
+            SourceSpec(
+                spec=spec,
+                mode="initial_only",
+                prefix_actions=prefix,
+                label="fork_probe",
+            )
+        ],
+    )
+    assert len(ps) == 1
+    state = ps.state(0)
+    expected = final_state(spec, prefix)
+    assert np.array_equal(state.board, expected.board)
+    assert state.turn_idx == expected.turn_idx
+    assert state.placements_left == expected.placements_left
+    agent = build(AlphaBetaAgentSpec())
+    score = score_agent(agent, ps, agent_label="alphabeta")
+    assert score.per_label == {"fork_probe": True}

@@ -1,0 +1,13 @@
+{
+  "name": "strong_16_random_schedule_heavy",
+  "seed": 0,
+  "device": "auto",
+  "model": {"name": "simple_conv", "params": {"channels": 64, "n_blocks": 4, "kernel_size": 3}},
+  "encoder": {"name": "default", "max_n": 100, "max_turns": 16},
+  "data": {"sources": [
+    {"kind": "supervised", "weight": 0.1, "set": "train_small"},
+    {"kind": "selfplay", "weight": 0.9, "spec_sampler": {"kind": "mixture", "n_min": 12, "n_max": 100, "turns_min": 3, "turns_max": 12, "fill_min": 0.45, "fill_max": 0.85, "max_marks_per_turn": 12, "random_weight": 0.8, "arc_weight": 0.07, "few_big_weight": 0.07, "many_small_weight": 0.06}, "games_per_iter": 40, "n_simulations": 64, "c_puct": 1.5, "dirichlet_alpha": 0.3, "dirichlet_eps": 0.25, "temperature_moves": 8, "capacity": 500000}
+  ]},
+  "loop": {"iters": 600, "steps_per_iter": 250, "batch_size": 512, "lr": 0.0007, "weight_decay": 0.0001, "eval_every": 25, "eval_n_simulations": 64, "eval_batch_size": 4096, "eval_max_positions": 8192},
+  "wandb": {"project": "main_street", "mode": "online"}
+}

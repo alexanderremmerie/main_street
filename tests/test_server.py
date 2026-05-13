@@ -7,6 +7,7 @@ from main_street.nn.checkpoint import CheckpointMeta, save_checkpoint
 from main_street.nn.encode import EncoderConfig, build_encoder
 from main_street.nn.models import build_model
 from main_street.server import create_app
+from tests._llm_test_utils import llm_server, openai_chat_response
 
 
 def _client(tmp_path: Path) -> TestClient:
@@ -57,6 +58,7 @@ def test_agents_lists_all_kinds(tmp_path: Path):
         "forkaware",
         "potentialaware",
         "mcts",
+        "llm",
         "alphazero",
     }
 
@@ -73,6 +75,38 @@ def test_move_returns_legal_cell(tmp_path: Path):
     )
     assert r.status_code == 200, r.text
     assert r.json()["cell"] == 5  # rightmost first
+
+
+def test_move_with_llm_agent(tmp_path: Path, monkeypatch):
+    c = _client(tmp_path)
+    monkeypatch.setenv("TEST_LLM_KEY", "dummy")
+
+    def responder(
+        _path: str, payload: dict[str, object]
+    ) -> tuple[int, dict[str, object], float | None]:
+        messages = payload["messages"]
+        assert isinstance(messages, list)
+        return 200, openai_chat_response('{"cell": 2}'), None
+
+    with llm_server(responder) as (base_url, _requests):
+        r = c.post(
+            "/api/move",
+            json={
+                "spec": {"n": 6, "schedule": [1, 1, 1]},
+                "actions": [],
+                "agent": {
+                    "kind": "llm",
+                    "base_url": base_url,
+                    "api_key_env": "TEST_LLM_KEY",
+                    "model": "test-model",
+                    "temperature": 0.0,
+                    "max_tokens": 16,
+                    "timeout_s": 1.0,
+                },
+            },
+        )
+    assert r.status_code == 200, r.text
+    assert r.json()["cell"] == 2
 
 
 def test_move_rejects_terminal_state(tmp_path: Path):

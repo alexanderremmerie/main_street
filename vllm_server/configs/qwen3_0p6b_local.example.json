@@ -1,0 +1,34 @@
+{
+  "server": {
+    "model": "Qwen/Qwen3-0.6B",
+    "served_model_name": "qwen3-0.6b-main-street",
+    "host": "0.0.0.0",
+    "port": 8000,
+    "api_key_env": "VLLM_API_KEY",
+    "dtype": "bfloat16",
+    "gpu_memory_utilization": 0.85,
+    "max_model_len": 8192,
+    "tensor_parallel_size": 1,
+    "swap_space": 4,
+    "trust_remote_code": false,
+    "enable_prefix_caching": true,
+    "extra_args": []
+  },
+  "agent": {
+    "temperature": 0.0,
+    "max_tokens": 16,
+    "timeout_s": 30.0,
+    "prompt_style": "json_v1",
+    "fallback": "rightmost_legal",
+    "seed": 0
+  },
+  "grpo": {
+    "enabled": true,
+    "trainer": "trl",
+    "trace_root": "data/llm_runs",
+    "export_root": "data/grpo_exports",
+    "prompt_dataset_name": "main_street_actions_qwen3_0p6b",
+    "reward_mode": "oracle_optimality_plus_legality",
+    "notes": "Recommended first GRPO target: small enough to iterate, modern enough to be useful."
+  }
+}

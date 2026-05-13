@@ -14,6 +14,7 @@ from itertools import combinations
 from . import store
 from .agents import AgentSpec, build
 from .core import GameSpec, GameState, X, final_state, outcome, step
+from .llm import LLMTraceContext, use_trace_context
 from .records import (
     ComparisonConfig,
     ComparisonRecord,
@@ -92,17 +93,31 @@ def play(
     """Play a full bot-vs-bot game and return its record (not persisted).
     Both agents must be buildable on the server (no human).
     """
+    game_id = _new_id()
     x = build(x_agent)
     o = build(o_agent)
     state = GameState.initial(spec)
     actions: list[int] = []
+    trace_source = "tournament" if eval_id is not None else "play"
     while not state.is_terminal:
         agent = x if state.current_player == X else o
-        cell = int(agent.act(state))
+        role = "x" if int(state.current_player) == int(X) else "o"
+        with use_trace_context(
+            LLMTraceContext(
+                run_id=game_id,
+                source=trace_source,
+                move_index=len(actions),
+                game_id=game_id,
+                eval_id=eval_id,
+                actor_id=role,
+                actor_label=role,
+            )
+        ):
+            cell = int(agent.act(state))
         actions.append(cell)
         state = step(state, cell)
     return GameRecord(
-        id=_new_id(),
+        id=game_id,
         spec=spec,
         x_agent=x_agent,
         o_agent=o_agent,

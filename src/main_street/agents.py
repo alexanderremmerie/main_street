@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import math
+import time
 from collections.abc import Callable
 from typing import Annotated, Literal, Protocol, TypeVar, runtime_checkable
 
@@ -15,6 +16,13 @@ import numpy as np
 from pydantic import BaseModel, ConfigDict, Field
 
 from .core import EMPTY, GameState, O, X, legal_actions, longest_run, outcome, step
+from .llm import (
+    append_trace,
+    board_to_string,
+    parse_json_cell_reply,
+    render_prompt,
+    request_chat_completion,
+)
 from .solve import search_with_depth
 
 SQRT_2 = math.sqrt(2.0)
@@ -98,6 +106,24 @@ class HumanAgentSpec(_Spec):
     kind: Literal["human"] = "human"
 
 
+class LLMAgentSpec(_Spec):
+    """OpenAI-compatible remote LLM inference agent."""
+
+    kind: Literal["llm"] = "llm"
+    base_url: str = Field(min_length=1, description="OpenAI-compatible API base URL.")
+    api_key_env: str = Field(
+        min_length=1,
+        description="Env var name containing the bearer token, if required.",
+    )
+    model: str = Field(min_length=1, description="Remote model identifier.")
+    temperature: float = Field(default=0.0, ge=0.0)
+    max_tokens: int = Field(default=32, gt=0)
+    timeout_s: float = Field(default=30.0, gt=0)
+    prompt_style: Literal["json_v1"] = "json_v1"
+    fallback: Literal["rightmost_legal"] = "rightmost_legal"
+    seed: int | None = None
+
+
 class AlphaZeroAgentSpec(_Spec):
     """Trained PUCT agent. Identified by the checkpoint it loads; everything
     else (n_simulations, c_puct, temperature) is at-inference behavior."""
@@ -126,6 +152,7 @@ AgentSpec = Annotated[
     | PotentialAwareAgentSpec
     | MCTSAgentSpec
     | HumanAgentSpec
+    | LLMAgentSpec
     | AlphaZeroAgentSpec,
     Field(discriminator="kind"),
 ]
@@ -143,6 +170,7 @@ KINDS: tuple[str, ...] = (
     "forkaware",
     "potentialaware",
     "mcts",
+    "llm",
     "alphazero",
 )
 SPEC_TYPES: dict[str, type[BaseModel]] = {
@@ -157,6 +185,7 @@ SPEC_TYPES: dict[str, type[BaseModel]] = {
     "forkaware": ForkAwareAgentSpec,
     "potentialaware": PotentialAwareAgentSpec,
     "mcts": MCTSAgentSpec,
+    "llm": LLMAgentSpec,
     "alphazero": AlphaZeroAgentSpec,
 }
 
@@ -172,6 +201,7 @@ LABELS: dict[str, str] = {
     "forkaware": "ForkAware",
     "potentialaware": "PotentialAware",
     "mcts": "MCTS (UCT)",
+    "llm": "LLM",
     "alphazero": "AlphaZero",
 }
 
@@ -604,6 +634,83 @@ class _MCTS:
             node = node.parent
 
 
+class _LLMAgent:
+    def __init__(self, spec: LLMAgentSpec) -> None:
+        self._spec = spec
+
+    def act(self, state: GameState) -> int:
+        if state.is_terminal:
+            raise ValueError("no legal moves: state is terminal")
+        legal = [int(cell) for cell in legal_actions(state).tolist()]
+        prompt = render_prompt(state, prompt_style=self._spec.prompt_style)
+
+        raw_response: str | None = None
+        parsed_cell: int | None = None
+        is_legal = False
+        error: str | None = None
+        started = time.perf_counter()
+        try:
+            raw_response = request_chat_completion(
+                base_url=self._spec.base_url,
+                api_key_env=self._spec.api_key_env,
+                model=self._spec.model,
+                prompt=prompt,
+                temperature=self._spec.temperature,
+                max_tokens=self._spec.max_tokens,
+                timeout_s=self._spec.timeout_s,
+                seed=self._spec.seed,
+            )
+            parsed_cell = parse_json_cell_reply(raw_response)
+            is_legal = parsed_cell in legal
+            if not is_legal:
+                error = f"illegal cell: {parsed_cell}"
+        except Exception as e:  # noqa: BLE001 - fallback is the contract here
+            error = str(e)
+        latency_ms = (time.perf_counter() - started) * 1000.0
+
+        if is_legal and parsed_cell is not None:
+            chosen = parsed_cell
+            fallback_used = False
+        else:
+            chosen = legal[-1]
+            fallback_used = True
+
+        append_trace(
+            {
+                "prompt": prompt,
+                "raw_response": raw_response,
+                "parsed_cell": parsed_cell,
+                "chosen_cell": chosen,
+                "legality": is_legal,
+                "fallback_used": fallback_used,
+                "latency_ms": latency_ms,
+                "error": error,
+                "model_config": {
+                    "kind": self._spec.kind,
+                    "base_url": self._spec.base_url,
+                    "api_key_env": self._spec.api_key_env,
+                    "model": self._spec.model,
+                    "temperature": self._spec.temperature,
+                    "max_tokens": self._spec.max_tokens,
+                    "timeout_s": self._spec.timeout_s,
+                    "prompt_style": self._spec.prompt_style,
+                    "fallback": self._spec.fallback,
+                    "seed": self._spec.seed,
+                },
+                "state": {
+                    "n": state.spec.n,
+                    "schedule": list(state.spec.schedule),
+                    "turn_idx": state.turn_idx,
+                    "placements_left": state.placements_left,
+                    "current_player": "X" if int(state.current_player) == int(X) else "O",
+                    "board": board_to_string(state),
+                    "legal_cells": legal,
+                },
+            }
+        )
+        return chosen
+
+
 def build(spec: AgentSpec) -> Agent:
     """Instantiate a runnable agent from its spec. Human specs cannot be built
     because humans act in the client; callers must check `spec.kind != "human"`
@@ -636,6 +743,8 @@ def build(spec: AgentSpec) -> Agent:
         )
     if isinstance(spec, HumanAgentSpec):
         raise ValueError("human agents act in the client; cannot build a server agent")
+    if isinstance(spec, LLMAgentSpec):
+        return _LLMAgent(spec)
     if isinstance(spec, AlphaZeroAgentSpec):
         # Lazy import so callers that only use classical baselines don't pay
         # the torch import cost.

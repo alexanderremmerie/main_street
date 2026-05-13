@@ -28,6 +28,7 @@ from .agents import (
     build,
 )
 from .core import GameSpec, final_state, legal_actions
+from .llm import LLMTraceContext, use_trace_context
 from .nn.checkpoint import discover_checkpoints, load_checkpoint
 from .nn.encode import Encoder
 from .nn.mcts import puct_search, select_action
@@ -331,7 +332,16 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         if state.is_terminal:
             raise HTTPException(400, "game is already terminal")
         agent = build(req.agent)
-        cell = int(agent.act(state))
+        with use_trace_context(
+            LLMTraceContext(
+                run_id=f"req_{uuid.uuid4().hex}",
+                source="api_move",
+                move_index=len(req.actions),
+                actor_id=req.agent.kind,
+                actor_label=req.agent.kind,
+            )
+        ):
+            cell = int(agent.act(state))
         return MoveResponse(cell=cell)
 
     @app.post("/api/inspect-model", response_model=InspectModelResponse)
@@ -483,7 +493,16 @@ def create_app(db_path: Path | None = None) -> FastAPI:
                 )
                 continue
             try:
-                cell = int(agent.act(state))
+                with use_trace_context(
+                    LLMTraceContext(
+                        run_id=f"analyze_{uuid.uuid4().hex}",
+                        source="analyze",
+                        move_index=len(req.actions),
+                        actor_id=player.id,
+                        actor_label=player.label,
+                    )
+                ):
+                    cell = int(agent.act(state))
             except Exception as e:  # noqa: BLE001 — surface any agent-level failure
                 verdicts.append(
                     PlayerVerdict(player_id=pid, label=player.label, error=str(e))

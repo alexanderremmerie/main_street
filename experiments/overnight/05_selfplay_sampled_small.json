@@ -1,0 +1,23 @@
+{
+  "name": "overnight_05_selfplay_sampled_small",
+  "seed": 0,
+  "device": "auto",
+  "model": {"name": "simple_conv", "params": {"channels": 64, "n_blocks": 4, "kernel_size": 3}},
+  "encoder": {"name": "default", "max_n": 24, "max_turns": 12},
+  "data": {
+    "sources": [{
+      "kind": "selfplay",
+      "weight": 1.0,
+      "spec_sampler": {"kind": "mixture", "n_min": 8, "n_max": 24, "turns_min": 3, "turns_max": 8, "fill_min": 0.55, "fill_max": 0.9, "max_marks_per_turn": 6, "random_weight": 0.4, "arc_weight": 0.25, "few_big_weight": 0.2, "many_small_weight": 0.15},
+      "games_per_iter": 14,
+      "n_simulations": 32,
+      "c_puct": 1.5,
+      "dirichlet_alpha": 0.3,
+      "dirichlet_eps": 0.25,
+      "temperature_moves": 6,
+      "capacity": 75000
+    }]
+  },
+  "loop": {"iters": 50, "steps_per_iter": 225, "batch_size": 512, "lr": 0.0008, "weight_decay": 0.0001, "eval_every": 5, "eval_n_simulations": 64, "eval_batch_size": 4096, "eval_max_positions": 8192},
+  "wandb": {"project": "main_street", "mode": "online"}
+}

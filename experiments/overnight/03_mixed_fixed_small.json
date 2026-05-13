@@ -1,0 +1,26 @@
+{
+  "name": "overnight_03_mixed_fixed_small",
+  "seed": 0,
+  "device": "auto",
+  "model": {"name": "simple_conv", "params": {"channels": 64, "n_blocks": 4, "kernel_size": 3}},
+  "encoder": {"name": "default", "max_n": 24, "max_turns": 12},
+  "data": {
+    "sources": [
+      {"kind": "supervised", "weight": 0.7, "set": "train_small"},
+      {
+        "kind": "selfplay",
+        "weight": 0.3,
+        "specs": [[6, [2, 3]], [9, [3, 4]], [10, [4, 4]], [10, [3, 5]], [7, [2, 2, 2]], [8, [2, 3, 2]], [9, [3, 3, 3]], [10, [3, 3, 3]], [8, [2, 2, 2, 2]], [9, [2, 2, 2, 2]], [10, [2, 2, 3, 2]], [7, [1, 1, 1, 1, 1, 1, 1]]],
+        "games_per_iter": 10,
+        "n_simulations": 32,
+        "c_puct": 1.5,
+        "dirichlet_alpha": 0.3,
+        "dirichlet_eps": 0.25,
+        "temperature_moves": 5,
+        "capacity": 50000
+      }
+    ]
+  },
+  "loop": {"iters": 40, "steps_per_iter": 200, "batch_size": 512, "lr": 0.001, "weight_decay": 0.0001, "eval_every": 5, "eval_n_simulations": 64, "eval_batch_size": 4096, "eval_max_positions": 8192},
+  "wandb": {"project": "main_street", "mode": "online"}
+}
